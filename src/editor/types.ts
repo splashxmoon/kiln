@@ -196,6 +196,11 @@ export interface Comment {
 }
 
 export interface KDoc {
+  /**
+   * File format version (see migrate.ts). Files saved before versioning have none and
+   * count as 0; every open runs `migrate()` to bring them up to DOC_VERSION.
+   */
+  version?: number
   id: string
   name: string
   createdAt: number

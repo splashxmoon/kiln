@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type DragEvent } from 'react'
-import { ArrowUp, Check, ChevronDown, ChevronLeft, ChevronRight, History, ImagePlus, MessageSquare, Plus, Settings2, Square, Trash2, X, AlertTriangle } from 'lucide-react'
+import { ArrowUp, Check, Undo2, ChevronDown, ChevronLeft, ChevronRight, History, ImagePlus, MessageSquare, Plus, Settings2, Square, Trash2, X, AlertTriangle } from 'lucide-react'
 import { formatElapsed, toolLabel } from '../../agent/humanize'
 import { agentChat, agentRun, agentSession as session, useNow } from './agentSession'
 import { MAX_IMAGES, chatImageUrl, fileToChatImage, imageFiles, pickImageFiles } from '../../agent/attachments'
@@ -10,7 +10,8 @@ import { AgentText } from './AgentText'
 import { ProviderIcon } from './ProviderIcon'
 import { pickSuggestions } from './suggestions'
 import './agent-chat.css'
-import { useEditor } from '../store'
+import { useEditor, getEditor } from '../store'
+import { lastTurnId, revertTurn, useTurn } from '../../agent/turns'
 import { loadProviderSettings, saveProviderSettings, providerById, type ProviderSettings } from '../../agent/providers'
 import type { ChatImage, ChatItem } from '../../agent/keys'
 
@@ -78,6 +79,7 @@ function StepsBlock({
   onToggle,
   startedAt,
   tookMs,
+  turnId,
 }: {
   steps: Step[]
   live: boolean
@@ -85,6 +87,8 @@ function StepsBlock({
   onToggle: () => void
   startedAt: number | null
   tookMs: number | undefined
+  /** the finished turn these steps belong to, when it changed the document (turns.ts) */
+  turnId?: number
 }) {
   const now = useNow(live)
   const n = steps.length
@@ -144,6 +148,30 @@ function StepsBlock({
             )
           })}
         </ol>
+      )}
+      {!live && <TurnFooter id={turnId} />}
+    </div>
+  )
+}
+
+/** Under a finished turn that changed the design: how much it changed, and Revert. */
+function TurnFooter({ id }: { id: number | undefined }) {
+  const turn = useTurn(id)
+  if (!turn) return null
+  const layers = `${turn.changed} layer${turn.changed === 1 ? '' : 's'}`
+  const revert = () => {
+    const r = revertTurn(turn.id)
+    if (!r) return
+    const kept = r.kept ? ` · kept ${r.kept} you changed since` : ''
+    getEditor().notify(`Reverted the agent's changes to ${r.restored} layer${r.restored === 1 ? '' : 's'}${kept}. Undo brings them back.`)
+  }
+  return (
+    <div className={'k-ac-turn' + (turn.reverted ? ' is-reverted' : '')}>
+      <span className="k-ac-turn-note">{turn.reverted ? `Reverted · ${layers}` : `Changed ${layers}`}</span>
+      {!turn.reverted && (
+        <button type="button" className="k-ac-turn-revert" onClick={revert} title="Put back what this turn changed, keeping your own edits since">
+          <Undo2 size={11} /> Revert this turn
+        </button>
       )}
     </div>
   )
@@ -281,6 +309,8 @@ export function AgentPanel() {
   // when the current turn started, and how long finished turns took (keyed by their last steps block)
   const [turnStart, setTurnStart] = useState<number | null>(null)
   const [took, setTook] = useState<Record<number, number>>({})
+  /** steps row start → the turn it ran in, for Revert (only turns that changed the design) */
+  const [turnOf, setTurnOf] = useState<Record<number, number>>({})
   const turnNow = useNow(busy && liveStart === null)
 
   /** Show the chat and save it. `withSession` is set once a turn has ended, so the agent context saved with it is complete. */
@@ -312,6 +342,7 @@ export function AgentPanel() {
     setChatId(id)
     setItems([])
     setTook({})
+    setTurnOf({})
     setView('chat')
   }
   const openChat = (c: SavedChat) => {
@@ -321,6 +352,7 @@ export function AgentPanel() {
     setChatId(c.id)
     setItems(c.items)
     setTook({})
+    setTurnOf({})
     setView('chat')
   }
   const removeChat = (id: string) => {
@@ -400,7 +432,11 @@ export function AgentPanel() {
       setBusy(false)
       const final = live?.items ?? []
       const lastSteps = toRows(final).findLast((r) => r.kind === 'steps')
-      if (lastSteps?.kind === 'steps') setTook((t) => ({ ...t, [lastSteps.start]: Date.now() - started }))
+      if (lastSteps?.kind === 'steps') {
+        setTook((t) => ({ ...t, [lastSteps.start]: Date.now() - started }))
+        const tid = lastTurnId()
+        if (tid !== undefined && tid >= started) setTurnOf((m) => ({ ...m, [lastSteps.start]: tid }))
+      }
       commit(final, true)
     }
   }
@@ -492,6 +528,7 @@ export function AgentPanel() {
                     live={live}
                     startedAt={live ? turnStart : null}
                     tookMs={took[row.start]}
+                    turnId={turnOf[row.start]}
                     open={stepOpen[row.start] ?? live}
                     onToggle={() => setStepOpen((o) => ({ ...o, [row.start]: !(o[row.start] ?? live) }))}
                   />

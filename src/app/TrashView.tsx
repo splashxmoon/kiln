@@ -67,7 +67,7 @@ export function TrashView({ trash, projects, changed }: { trash: TrashItem[] | n
       <div className="k-files-grid">
         {(trash ?? []).map((t) => (
           <div key={t.trashId} className="k-file-card k-trash-card">
-            <div className="k-file-thumb is-dim">{t.thumbnail ? <img src={t.thumbnail} alt="" draggable={false} /> : <span className="k-file-thumb-empty" />}</div>
+            <div className="k-file-thumb is-dim">{t.thumbnail ? <img src={t.thumbnail} alt="" draggable={false} loading="lazy" decoding="async" /> : <span className="k-file-thumb-empty" />}</div>
             <div className="k-file-meta">
               <div>
                 <div className="k-file-title">{t.name}</div>

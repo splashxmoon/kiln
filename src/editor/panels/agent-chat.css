@@ -193,6 +193,46 @@
   transform: rotate(90deg);
 }
 
+/* under a finished turn: what it changed, and Revert */
+.k-ac-turn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px 6px 34px;
+  border-top: 1px solid var(--k-line);
+  font-size: 11px;
+  color: var(--k-faint-2);
+}
+.k-ac-turn-note {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.k-ac-turn-revert {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 0;
+  background: none;
+  color: var(--k-muted);
+  font-size: 11px;
+  white-space: nowrap;
+  transition: background-color var(--k-dur) var(--k-ease), color var(--k-dur) var(--k-ease);
+}
+.k-ac-turn-revert:hover {
+  background: var(--k-raise);
+  color: var(--k-text);
+}
+.k-ac-turn-revert:focus-visible {
+  outline: 2px solid var(--k-ember);
+  outline-offset: 1px;
+}
+
 .k-ac-tl {
   list-style: none;
   margin: 0;

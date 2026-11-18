@@ -99,6 +99,10 @@ jobs:
       - name: Lint
         run: npx oxlint src
 
+      - name: Unit tests
+        if: matrix.test
+        run: npm test
+
       # unix-only tests are behind #[cfg(unix)], so Windows runs the rest
       - name: Rust tests
         if: matrix.test

@@ -1,32 +1,49 @@
-import { memo, useLayoutEffect, useRef } from 'react'
+import { memo, useLayoutEffect, useMemo, useRef } from 'react'
 import type { CSSProperties } from 'react'
 import { useEditor, getEditor } from './store'
 import { nodeToCSS } from './style'
 import { ShaderCanvas } from '../shaders/ShaderCanvas'
 import { vectorPaint, type SvgGradient } from './vector'
+import type { KNode } from './types'
 
 export const NodeView = memo(function NodeView({ id }: { id: string }) {
   const node = useEditor((s) => s.doc.nodes[id])
-  const parent = useEditor((s) => {
+  // nodeToCSS only reads the parent's layout mode and direction. Subscribing to the whole
+  // parent would re-render every child whenever the parent moves, resizes or is restyled.
+  const parentLayout = useEditor((s) => {
     const n = s.doc.nodes[id]
-    return n?.parentId ? s.doc.nodes[n.parentId] : null
+    const p = n?.parentId ? s.doc.nodes[n.parentId] : null
+    return p ? `${p.layout.mode}:${p.layout.direction}` : ''
   })
   const tokens = useEditor((s) => s.doc.tokens)
   const editing = useEditor((s) => s.editingTextId === id)
   const drag = useEditor((s) => (s.drag && s.drag.ids.includes(id) ? s.drag : null))
+  const cull = !!node && canCull(node)
+  const base = useMemo(() => {
+    if (!node) return null
+    const p = parentLayout ? getEditor().doc.nodes[node.parentId!] : null
+    const css = nodeToCSS(node, p, tokens) as CSSProperties
+    // the placeholder size perf.css gives a skipped artboard (the same as its fixed size)
+    return cull ? ({ ...css, '--kc-w': `${node.width}px`, '--kc-h': `${node.height}px` } as CSSProperties) : css
+  }, [node, parentLayout, tokens, cull])
 
-  if (!node) return null
-  const style = nodeToCSS(node, parent, tokens) as CSSProperties
-  if (drag) {
-    style.transform = `translate(${drag.dx}px, ${drag.dy}px)${style.transform ? ' ' + style.transform : ''}`
-    style.zIndex = 10000
-    style.pointerEvents = 'none'
-    style.opacity = Math.min(Number(style.opacity ?? 1), 0.85)
-  }
+  if (!node || !base) return null
+  // while dragged: a new object, so the memoised style never keeps the drag offset
+  const style: CSSProperties = drag
+    ? {
+        ...base,
+        transform: `translate(${drag.dx}px, ${drag.dy}px)${base.transform ? ' ' + base.transform : ''}`,
+        zIndex: 10000,
+        pointerEvents: 'none',
+        opacity: Math.min(Number(base.opacity ?? 1), 0.85),
+      }
+    : base
 
   const common = {
     'data-id': id,
     'data-type': node.type,
+    // off-screen culling (perf.css)
+    'data-cull': cull ? '' : undefined,
     className: 'kn',
   }
 
@@ -80,6 +97,15 @@ export const NodeView = memo(function NodeView({ id }: { id: string }) {
     </div>
   )
 })
+
+/**
+ * Artboards the browser may skip rendering while off screen: top-level frames with content
+ * that clip it (paint containment then hides nothing) and have a fixed size (size containment
+ * then changes no measurement).
+ */
+function canCull(n: KNode) {
+  return n.parentId === null && n.type === 'frame' && n.clip && n.widthMode === 'fixed' && n.heightMode === 'fixed' && n.children.length > 0
+}
 
 export function SvgGradientDef({ g }: { g: SvgGradient }) {
   const stops = g.stops.map((s, i) => <stop key={i} offset={s.offset} stopColor={s.color} />)

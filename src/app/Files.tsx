@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useCallback, useDeferredValue, useState } from 'react'
 import { Plus, Search, FolderOpen } from 'lucide-react'
 import { storage, type FileMeta, type ProjectMeta } from '../platform/storage'
 import { isTauri, isMac, desktopRevealFolder, onWindowDragMouseDown } from '../platform/tauri'
@@ -21,7 +21,11 @@ import './projects.css'
 export function Files({ view, open }: { view: HomeView; open: (id: string) => void }) {
   const { files, projects, trash, refresh } = useHomeData()
   const [q, setQ] = useState('')
-  const term = q.trim().toLowerCase()
+  // the field updates at once; filtering the cards follows when the browser has time
+  const deferredQ = useDeferredValue(q)
+  const term = deferredQ.trim().toLowerCase()
+  // stable, so memoised file cards don't all draw again on every keystroke
+  const changed = useCallback(() => void refresh(), [refresh])
   const searching = term !== ''
   const allProjects = projects ?? []
   const projectOf = (id: string) => allProjects.find((p) => p.id === id)
@@ -85,11 +89,11 @@ export function Files({ view, open }: { view: HomeView; open: (id: string) => vo
                 files={files}
                 projects={allProjects}
                 open={open}
-                changed={() => void refresh()}
+                changed={changed}
                 onClear={() => setQ('')}
               />
             ) : view.kind === 'trash' ? (
-              <TrashView trash={trash} projects={allProjects} changed={() => void refresh()} />
+              <TrashView trash={trash} projects={allProjects} changed={changed} />
             ) : view.kind === 'project' ? (
               projects && !projectOf(view.id) ? (
                 <div className="k-files-empty">
@@ -105,7 +109,7 @@ export function Files({ view, open }: { view: HomeView; open: (id: string) => vo
                   files={listFiles(files, (f) => f.projectId === view.id)}
                   projects={allProjects}
                   open={open}
-                  changed={() => void refresh()}
+                  changed={changed}
                   gone={() => {
                     location.hash = '#/files'
                     void refresh()
@@ -120,7 +124,7 @@ export function Files({ view, open }: { view: HomeView; open: (id: string) => vo
                 files={files}
                 projects={allProjects}
                 open={open}
-                changed={() => void refresh()}
+                changed={changed}
                 make={(kind) => void newFile(kind)}
               />
             )}

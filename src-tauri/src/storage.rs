@@ -62,6 +62,9 @@ pub struct TrashItem {
 pub struct ExportFile {
     pub path: String,
     pub contents: String,
+    /// `contents` is base64 (PNG / JPG exports): written as the decoded bytes.
+    #[serde(default)]
+    pub base64: bool,
 }
 
 /// On-disk `project.json`. Unknown keys are preserved on rewrite.
@@ -112,6 +115,14 @@ struct Sidecar {
     project_id: Option<String>,
     #[serde(default)]
     deleted_at: Option<Value>,
+    /// The document's id, name and thumbnail, so listing the trash never parses whole
+    /// documents. Absent in sidecars written before they were added (backfilled on list).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    thumbnail: Option<String>,
 }
 
 type DirCache = Mutex<HashMap<PathBuf, HashMap<String, PathBuf>>>;
@@ -119,6 +130,18 @@ type DirCache = Mutex<HashMap<PathBuf, HashMap<String, PathBuf>>>;
 /// root -> (file id -> folder holding `<id>.kiln`), refreshed on every list.
 /// (OnceLock rather than LazyLock: the crate's rust-version is 1.77.)
 static DIR_CACHE: OnceLock<DirCache> = OnceLock::new();
+
+/// One listing at a time: the home screen lists files and projects together, and the second
+/// listing then finds a fresh index instead of re-parsing the same changed files in parallel.
+static LIST_LOCK: Mutex<()> = Mutex::new(());
+
+/// (root, file id) -> the `updatedAt` last written. Two autosaves can overlap (a slow save of a
+/// big document, then the next one); a save older than what is on disk is dropped.
+static SAVED: OnceLock<Mutex<HashMap<(PathBuf, String), f64>>> = OnceLock::new();
+
+fn saved() -> std::sync::MutexGuard<'static, HashMap<(PathBuf, String), f64>> {
+    SAVED.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
+}
 
 fn dir_cache() -> &'static DirCache {
     DIR_CACHE.get_or_init(Default::default)
@@ -491,6 +514,7 @@ fn mtime_ms(md: &fs::Metadata) -> f64 {
 /// Lists drafts and project files, newest first. Uses (and refreshes) the index so only
 /// changed files are re-parsed; the index never makes listing fail.
 pub fn list_in(root: &Path) -> Result<Vec<FileMeta>, String> {
+    let _one_at_a_time = LIST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     fs::read_dir(root).map_err(|e| format!("cannot read {}: {e}", root.display()))?;
     let old = read_index(root);
     let mut index = HashMap::new();
@@ -553,7 +577,9 @@ pub fn list_in(root: &Path) -> Result<Vec<FileMeta>, String> {
     }
 
     if index != old {
-        if let Err(e) = write_json(&root.join(INDEX), &index) {
+        // compact: the index is a cache nobody reads by hand, and it carries every thumbnail
+        let bytes = serde_json::to_vec(&index).map_err(|e| e.to_string());
+        if let Err(e) = bytes.and_then(|b| atomic_write(&root.join(INDEX), &b)) {
             eprintln!("[kiln] cannot update index: {e}");
         }
     }
@@ -578,13 +604,26 @@ pub fn save_in(root: &Path, doc: &Value, project_id: Option<&str>) -> Result<(),
         .and_then(Value::as_str)
         .ok_or("document has no string `id`")?;
     check_id(id)?;
+    let stamp = doc.get("updatedAt").and_then(Value::as_f64);
+    let key = (root.to_path_buf(), id.to_string());
+    // held through the write, so saves of a file land in order
+    let mut saved = saved();
+    if let (Some(new), Some(&old)) = (stamp, saved.get(&key)) {
+        if new < old {
+            return Ok(()); // an older save that lost the race: what is on disk is newer
+        }
+    }
     let bytes = serde_json::to_vec_pretty(doc).map_err(|e| e.to_string())?;
     if let Some(path) = resolve(root, id) {
-        return atomic_write(&path, &bytes);
+        atomic_write(&path, &bytes)?;
+    } else {
+        let dir = project_dir_for(root, project_id)?;
+        atomic_write(&file_path(&dir, id), &bytes)?;
+        cache_set(root, id, &dir);
     }
-    let dir = project_dir_for(root, project_id)?;
-    atomic_write(&file_path(&dir, id), &bytes)?;
-    cache_set(root, id, &dir);
+    if let Some(new) = stamp {
+        saved.insert(key, new);
+    }
     Ok(())
 }
 
@@ -607,12 +646,35 @@ fn move_to_trash(root: &Path, src: &Path, id: &str, project_id: Option<&str>) ->
         ms += 1;
         stem = format!("{id}-{ms}");
     }
+    // the name and thumbnail come from the index when it has them (no parse of a big document)
+    let meta = trashed_meta(root, src, id);
     fs::rename(src, file_path(&trash, &stem)).map_err(|e| format!("cannot move {id} to trash: {e}"))?;
-    let sidecar = serde_json::json!({ "projectId": project_id, "deletedAt": deleted_at });
+    saved().remove(&(root.to_path_buf(), id.to_string()));
+    let sidecar = Sidecar {
+        project_id: project_id.map(str::to_string),
+        deleted_at: Some(Value::from(deleted_at)),
+        id: Some(meta.id),
+        name: Some(meta.name),
+        thumbnail: meta.thumbnail,
+    };
     if let Err(e) = write_json(&trash.join(format!("{stem}.json")), &sidecar) {
         eprintln!("[kiln] cannot write trash sidecar: {e}");
     }
     Ok(stem)
+}
+
+/// A file's id, name and thumbnail for its trash sidecar: from the index if it is current there,
+/// else read from the file.
+fn trashed_meta(root: &Path, src: &Path, stem: &str) -> FileMeta {
+    let size = fs::metadata(src).map(|m| m.len()).ok();
+    let indexed = read_index(root).into_values().find(|e| e.id == stem && Some(e.size) == size);
+    match indexed {
+        Some(e) => FileMeta { id: e.id, name: e.name, updated_at: e.updated_at, thumbnail: e.thumbnail, project_id: None },
+        None => match read_json(src) {
+            Ok(v) if v.is_object() => meta_from_value(&v, stem),
+            _ => FileMeta { id: stem.to_string(), name: "Untitled".into(), updated_at: zero(), thumbnail: None, project_id: None },
+        },
+    }
 }
 
 pub fn delete_in(root: &Path, id: &str) -> Result<(), String> {
@@ -643,13 +705,36 @@ pub fn list_trash_in(root: &Path) -> Result<Vec<TrashItem>, String> {
         if !is_valid_id(&stem) {
             continue;
         }
-        let v = match read_json(&path) {
-            Ok(v) if v.is_object() => v,
-            _ => continue,
-        };
         let (fallback_id, suffix_ms) = split_trash_stem(&stem);
-        let meta = meta_from_value(&v, fallback_id);
-        let sidecar = read_sidecar(&trash.join(format!("{stem}.json"))).unwrap_or_default();
+        let sidecar_path = trash.join(format!("{stem}.json"));
+        let mut sidecar = read_sidecar(&sidecar_path).unwrap_or_default();
+        let meta = match (&sidecar.id, &sidecar.name) {
+            (Some(id), Some(name)) => FileMeta {
+                id: id.clone(),
+                name: name.clone(),
+                updated_at: zero(),
+                thumbnail: sidecar.thumbnail.clone(),
+                project_id: None,
+            },
+            // an older sidecar: read the document once, and keep what it says for next time
+            _ => {
+                let v = match read_json(&path) {
+                    Ok(v) if v.is_object() => v,
+                    _ => continue,
+                };
+                let meta = meta_from_value(&v, fallback_id);
+                sidecar.id = Some(meta.id.clone());
+                sidecar.name = Some(meta.name.clone());
+                sidecar.thumbnail = meta.thumbnail.clone();
+                if sidecar.deleted_at.is_none() {
+                    sidecar.deleted_at = suffix_ms.map(Value::from);
+                }
+                if let Err(e) = write_json(&sidecar_path, &sidecar) {
+                    eprintln!("[kiln] cannot update trash sidecar: {e}");
+                }
+                meta
+            }
+        };
         let deleted_at = sidecar
             .deleted_at
             .as_ref()
@@ -1054,11 +1139,8 @@ pub async fn export_to_folder<R: Runtime>(
     app: AppHandle<R>,
     files: Vec<ExportFile>,
 ) -> Result<Option<String>, String> {
-    // Validate every path before asking the user for anything.
-    let checked = files
-        .into_iter()
-        .map(|f| safe_relative_path(&f.path).map(|p| (p, f.contents)))
-        .collect::<Result<Vec<_>, _>>()?;
+    // Validate every path (and decode every image) before asking the user for anything.
+    let checked = prepare_export(files)?;
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog()
@@ -1087,6 +1169,57 @@ pub async fn export_to_folder<R: Runtime>(
     })
     .await?;
     Ok(Some(root.to_string_lossy().into_owned()))
+}
+
+/// Each export file as a safe relative path and the bytes to write.
+fn prepare_export(files: Vec<ExportFile>) -> Result<Vec<(PathBuf, Vec<u8>)>, String> {
+    files
+        .into_iter()
+        .map(|f| {
+            let path = safe_relative_path(&f.path)?;
+            let bytes = if f.base64 {
+                decode_base64(&f.contents).map_err(|e| format!("{}: {e}", f.path))?
+            } else {
+                f.contents.into_bytes()
+            };
+            Ok((path, bytes))
+        })
+        .collect()
+}
+
+/// Standard or URL-safe base64, padding optional, whitespace ignored.
+fn decode_base64(s: &str) -> Result<Vec<u8>, String> {
+    fn value(c: u8) -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some((c - b'A') as u32),
+            b'a'..=b'z' => Some((c - b'a') as u32 + 26),
+            b'0'..=b'9' => Some((c - b'0') as u32 + 52),
+            b'+' | b'-' => Some(62),
+            b'/' | b'_' => Some(63),
+            _ => None,
+        }
+    }
+    let bytes: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    let body = bytes
+        .strip_suffix(b"==")
+        .or_else(|| bytes.strip_suffix(b"="))
+        .unwrap_or(&bytes);
+    if body.len() % 4 == 1 {
+        return Err("invalid base64 length".into());
+    }
+    let mut out = Vec::with_capacity(body.len() * 3 / 4);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for &c in body {
+        let v = value(c).ok_or_else(|| format!("invalid base64 character {:?}", c as char))?;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1141,6 +1274,39 @@ mod tests {
         if cfg!(not(windows)) {
             assert!(safe_relative_path_for("a:b.txt", false).is_ok(), "unchanged on macOS and Linux");
         }
+    }
+
+    #[test]
+    fn base64_decoding() {
+        let d = |s: &str| decode_base64(s).unwrap();
+        assert_eq!(d(""), b"");
+        assert_eq!(d("Zg=="), b"f");
+        assert_eq!(d("Zm8="), b"fo");
+        assert_eq!(d("Zm9v"), b"foo");
+        assert_eq!(d("Zm9vYg"), b"foob"); // padding left off
+        assert_eq!(d("SGVs\nbG8s IEtp bG4h"), b"Hello, Kiln!");
+        assert_eq!(d("+/+/"), [0xfb, 0xff, 0xbf]);
+        assert_eq!(d("-_-_"), [0xfb, 0xff, 0xbf]); // URL-safe alphabet
+        // a real PNG header survives the round trip
+        assert_eq!(d("iVBORw0KGgo="), [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
+        for bad in ["Z", "Zm9vY", "Zm*v", "Zg==Zg==", "data:image/png;base64,Zg=="] {
+            assert!(decode_base64(bad).is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn export_files_decode_images_and_keep_text() {
+        let file = |path: &str, contents: &str, base64: bool| ExportFile { path: path.into(), contents: contents.into(), base64 };
+        let out = prepare_export(vec![file("Card@2x.png", "iVBORw0KGgo=", true), file("index.html", "<p>hi</p>", false)]).unwrap();
+        assert_eq!(out[0], (PathBuf::from("Card@2x.png"), vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]));
+        assert_eq!(out[1], (PathBuf::from("index.html"), b"<p>hi</p>".to_vec()));
+        // an old caller that sends no flag still writes text
+        let old: ExportFile = serde_json::from_value(json!({"path": "a.css", "contents": "b{}"})).unwrap();
+        assert!(!old.base64);
+        // bad paths and bad base64 fail before anything is written
+        assert!(prepare_export(vec![file("../x.png", "Zg==", true)]).is_err());
+        let err = prepare_export(vec![file("ok.txt", "x", false), file("broken.png", "Zm*v", true)]).unwrap_err();
+        assert!(err.contains("broken.png"), "{err}");
     }
 
     #[test]
@@ -1282,6 +1448,54 @@ mod tests {
         assert!(root.join("Client Acme").is_dir());
 
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn trash_lists_from_sidecars_without_reading_documents() {
+        let root = temp_root();
+        let mut d = doc("big", "Big file", 5);
+        d["thumbnail"] = json!("data:image/png;base64,AAAA");
+        save_in(&root, &d, None).unwrap();
+        list_in(&root).unwrap(); // the index now knows the file
+        delete_in(&root, "big").unwrap();
+        // make the trashed document unreadable: listing must not need it
+        let item = list_trash_in(&root).unwrap().remove(0);
+        fs::write(file_path(&trash_dir(&root), &item.trash_id), b"{not json").unwrap();
+        let again = list_trash_in(&root).unwrap();
+        assert_eq!((again[0].id.as_str(), again[0].name.as_str()), ("big", "Big file"));
+        assert_eq!(again[0].thumbnail.as_deref(), Some("data:image/png;base64,AAAA"));
+
+        // a sidecar from before names were stored: read once, then remembered
+        let trash = trash_dir(&root);
+        fs::write(file_path(&trash, "old-1700000000000"), serde_json::to_vec(&doc("old", "Old one", 1)).unwrap()).unwrap();
+        fs::write(trash.join("old-1700000000000.json"), br#"{"projectId":null,"deletedAt":1700000000000}"#).unwrap();
+        let listed = list_trash_in(&root).unwrap();
+        let old = listed.iter().find(|t| t.id == "old").unwrap();
+        assert_eq!((old.name.as_str(), old.deleted_at), ("Old one", 1700000000000));
+        let side = read_sidecar(&trash.join("old-1700000000000.json")).unwrap();
+        assert_eq!(side.name.as_deref(), Some("Old one"));
+        // restore still finds its way back
+        let restored = restore_trash_in(&root, "old-1700000000000").unwrap();
+        assert_eq!(load_in(&root, &restored).unwrap().unwrap()["name"], "Old one");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_older_save_never_overwrites_a_newer_one() {
+        let root = temp_root();
+        save_in(&root, &doc("race", "Newer", 200), None).unwrap();
+        save_in(&root, &doc("race", "Older", 100), None).unwrap(); // lost the race
+        assert_eq!(load_in(&root, "race").unwrap().unwrap()["name"], "Newer");
+        save_in(&root, &doc("race", "Same time", 200), None).unwrap(); // a flush of the same edit
+        save_in(&root, &doc("race", "Latest", 300), None).unwrap();
+        assert_eq!(load_in(&root, "race").unwrap().unwrap()["name"], "Latest");
+        // deleted and restored: its older timestamp saves again
+        delete_in(&root, "race").unwrap();
+        let tid = list_trash_in(&root).unwrap().remove(0).trash_id;
+        restore_trash_in(&root, &tid).unwrap();
+        save_in(&root, &doc("race", "After restore", 250), None).unwrap();
+        assert_eq!(load_in(&root, "race").unwrap().unwrap()["name"], "After restore");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

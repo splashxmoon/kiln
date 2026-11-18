@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Check, Copy, Download, FolderDown } from 'lucide-react'
-import { useEditor, getEditor } from '../store'
+import { useDeferredValue, useEffect, useMemo, useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
+import { Check, Copy, Download, FolderDown, Images } from 'lucide-react'
+import { useEditor, getEditor, type EditorState } from '../store'
 import { exportNode, exportTokensCSS, exportTokensTailwind, nodeCSSDeclarations, shaderRuntimeReady, type ExportTarget, type ExportFile } from '../../codegen'
 import { isTauri, desktopExport } from '../../platform/tauri'
-import { snapshotNode, downloadDataURL } from '../snapshot'
+import { exportArtboards, exportImage, imageFileName, saveImages, type ImageFormat } from '../snapshot'
 import { Select, type SelectOption } from '../../ui/Select'
+import { Segmented } from '../ui/controls'
 import { FormatIcon, type FormatKind } from './FormatIcons'
 import './code-panel.css'
 
@@ -17,6 +19,46 @@ const FORMATS: SelectOption<Tab>[] = [
   { value: 'vue', label: 'Vue', icon: <FormatIcon kind="vue" /> },
   { value: 'css', label: 'CSS', icon: <FormatIcon kind="css" /> },
   { value: 'tokens', label: 'Design tokens', icon: <FormatIcon kind="tokens" /> },
+]
+
+/**
+ * Everything the export of `targetId` reads, as object references: the layer and everything inside
+ * it, its ancestors and its parent's children (position and tags depend on them) and the tokens.
+ * Immer keeps unchanged layers the same objects, so this list changes only when one of those
+ * layers does: an edit elsewhere, a pan or a hover doesn't regenerate the code.
+ */
+function exportInputs(s: EditorState, tab: Tab, targetId: string | undefined): unknown[] {
+  const doc = s.doc
+  // the tokens file lists the fonts of every text layer, so it follows the whole document
+  if (tab === 'tokens') return [doc.tokens, doc.nodes]
+  const n = targetId ? doc.nodes[targetId] : undefined
+  if (!n) return [doc.tokens]
+  const out: unknown[] = [doc.tokens]
+  const walk = (id: string) => {
+    const x = doc.nodes[id]
+    if (!x) return
+    out.push(x)
+    for (const c of x.children) walk(c)
+  }
+  walk(n.id)
+  for (let p = n.parentId; p; p = doc.nodes[p]?.parentId ?? null) {
+    const a = doc.nodes[p]
+    if (!a) break
+    out.push(a)
+    if (p === n.parentId) for (const c of a.children) if (c !== n.id) out.push(doc.nodes[c])
+  }
+  return out
+}
+
+const IMAGE_FORMATS: { value: ImageFormat; label: string; title: string }[] = [
+  { value: 'png', label: 'PNG', title: 'PNG: sharp, keeps transparency' },
+  { value: 'jpg', label: 'JPG', title: 'JPG: smaller, white where the layer is transparent' },
+  { value: 'svg', label: 'SVG', title: 'Browser SVG: the layer’s HTML inside an SVG' },
+]
+const SCALES: { value: '1' | '2' | '3'; label: string; title: string }[] = [
+  { value: '1', label: '1x', title: 'Actual size' },
+  { value: '2', label: '2x', title: 'Twice the size (retina)' },
+  { value: '3', label: '3x', title: 'Three times the size' },
 ]
 
 /** Tiny syntax highlighter — enough to make code readable, no dependencies. */
@@ -56,30 +98,39 @@ function downloadText(name: string, text: string) {
 }
 
 export function CodePanel() {
-  const selection = useEditor((s) => s.selection)
-  const doc = useEditor((s) => s.doc)
-  const pageId = useEditor((s) => s.pageId)
   const [tab, setTab] = useState<Tab>('tailwind')
+  // the layer shown: the first selected, else the page's first artboard
+  const targetId = useEditor((s) => s.selection[0] ?? s.doc.pages.find((p) => p.id === s.pageId)?.children[0])
+  const node = useEditor((s) => (targetId ? s.doc.nodes[targetId] : undefined)) ?? null
+  const inputs = useEditor(useShallow((s) => exportInputs(s, tab, targetId)))
+  // typing or dragging keeps going at full speed; the code catches up when there's time
+  const deferredInputs = useDeferredValue(inputs)
   const [copied, setCopied] = useState(false)
+  const [imageFormat, setImageFormat] = useState<ImageFormat>('png')
+  const [scale, setScale] = useState<'1' | '2' | '3'>('2')
+  const [exporting, setExporting] = useState(false)
+  const artboardCount = useEditor((s) => {
+    const page = s.doc.pages.find((p) => p.id === s.pageId)
+    return (page?.children ?? []).filter((id) => s.doc.nodes[id]?.type === 'frame' && s.doc.nodes[id].visible).length
+  })
   const [, force] = useState(0)
   useEffect(() => {
     shaderRuntimeReady.then(() => force((x) => x + 1))
   }, [])
 
-  const page = doc.pages.find((p) => p.id === pageId)
-  const targetId = selection[0] ?? page?.children[0]
-  const node = targetId ? doc.nodes[targetId] : null
-
   const result = useMemo(() => {
+    void deferredInputs // what this depends on; the export reads the current document
+    const doc = getEditor().doc
     if (tab === 'tokens') return { files: [{ path: 'tokens.css', contents: exportTokensCSS(doc) + '\n\n/* Tailwind v4 */\n' + exportTokensTailwind(doc), language: 'css' as const }], snippet: '', snippetLanguage: 'css' as const }
-    if (!targetId || !node) return null
+    if (!targetId || !doc.nodes[targetId]) return null
     if (tab === 'css') return { files: [{ path: 'layer.css', contents: nodeCSSDeclarations(doc, targetId), language: 'css' as const }], snippet: '', snippetLanguage: 'css' as const }
     try {
       return exportNode(doc, targetId, tab)
     } catch (e) {
       return { files: [{ path: 'error.txt', contents: String((e as Error).message), language: 'css' as const }], snippet: '', snippetLanguage: 'css' as const }
     }
-  }, [doc, targetId, node, tab])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deferredInputs, targetId, tab])
 
   const [fileIdx, setFileIdx] = useState(0)
   useEffect(() => setFileIdx(0), [tab, targetId])
@@ -87,6 +138,36 @@ export function CodePanel() {
   const file = files[Math.min(fileIdx, files.length - 1)]
   const lang = file?.language === 'css' ? 'css' : 'tsx'
   const showTarget = !!node && tab !== 'tokens'
+
+  /** run one image export at a time; the button shows it is busy meanwhile */
+  const busy = async (job: () => Promise<void>) => {
+    if (exporting) return
+    setExporting(true)
+    try {
+      await job()
+    } catch (e) {
+      getEditor().notify('Export failed: ' + ((e as Error)?.message ?? String(e)))
+    } finally {
+      setExporting(false)
+    }
+  }
+  const exportLayer = () =>
+    busy(async () => {
+      if (!node) return
+      const url = await exportImage(node.id, imageFormat, Number(scale))
+      if (!url) return getEditor().notify(`Could not render ${imageFormat.toUpperCase()} for this layer`)
+      const name = imageFileName(node.name, imageFormat, Number(scale))
+      const where = await saveImages([{ path: name, url }])
+      if (where) getEditor().notify(`Exported ${name} to ${where}`)
+    })
+  const exportAll = () =>
+    busy(async () => {
+      const { saved, failed, where } = await exportArtboards(imageFormat, Number(scale))
+      const skipped = failed ? ` (${failed} couldn’t be rendered)` : ''
+      if (!saved) getEditor().notify('No artboards could be rendered' + skipped)
+      else if (where) getEditor().notify(`Exported ${saved} artboard${saved > 1 ? 's' : ''} to ${where}${skipped}`)
+      else if (failed) getEditor().notify(`Downloaded ${saved} artboard${saved > 1 ? 's' : ''}${skipped}`)
+    })
 
   return (
     <div className="k-code">
@@ -139,7 +220,7 @@ export function CodePanel() {
       )}
 
       {file && (
-        <footer className="k-code-actions">
+        <footer className="k-code-actions" style={{ gridTemplateColumns: 'minmax(0, 1fr)' }}>
           <button
             type="button"
             className="k-btn-primary k-code-primary"
@@ -153,20 +234,30 @@ export function CodePanel() {
             {isTauri ? <FolderDown size={13} /> : <Download size={13} />}
             {isTauri ? 'Export to folder' : files.length > 1 ? `Download ${files.length} files` : 'Download'}
           </button>
-          {node && (
-            <button
-              type="button"
-              className="k-btn-ghost k-code-secondary"
-              onClick={async () => {
-                const url = await snapshotNode(node.id, { scale: 2 })
-                if (url) downloadDataURL(url, `${node.name.replace(/[^\w-]+/g, '-')}@2x.png`)
-                else getEditor().notify('Could not render PNG for this layer')
-              }}
-            >
-              <Download size={13} />
-              PNG @2x
-            </button>
+        </footer>
+      )}
+
+      {(node || artboardCount > 0) && (
+        <footer className="k-code-actions" aria-label="Export as image" aria-busy={exporting}>
+          <Segmented<ImageFormat> size="sm" value={imageFormat} options={IMAGE_FORMATS} onChange={setImageFormat} />
+          {imageFormat === 'svg' ? (
+            <span style={{ alignSelf: 'center', fontSize: 11, color: 'var(--k-muted)' }} title="The layer’s HTML inside an SVG <foreignObject>: it shows in browsers, not in most design tools">
+              Browser SVG
+            </span>
+          ) : (
+            <div style={{ width: 108, display: 'flex' }}>
+              <Segmented size="sm" value={scale} options={SCALES} onChange={setScale} />
+            </div>
           )}
+          <button type="button" className="k-btn-ghost k-code-secondary" disabled={!node || exporting} onClick={exportLayer} title={node ? `Export “${node.name}” as ${imageFormat.toUpperCase()}` : 'Select a layer to export it'}>
+            <Download size={13} />
+            {imageFormat.toUpperCase()}
+            {imageFormat !== 'svg' && ` @${scale}x`}
+          </button>
+          <button type="button" className="k-btn-ghost k-code-secondary" disabled={!artboardCount || exporting} onClick={exportAll} title={`Export every artboard on this page as ${imageFormat.toUpperCase()}`}>
+            <Images size={13} />
+            All artboards
+          </button>
         </footer>
       )}
     </div>

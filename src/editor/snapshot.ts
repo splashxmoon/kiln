@@ -1,5 +1,6 @@
 /**
- * Rasterise a layer to PNG (thumbnails, PNG export, agent screenshots).
+ * Rasterise a layer to PNG or JPG (thumbnails, image export, agent screenshots), or wrap it in
+ * a browser SVG, and save exports (a download on the web, a folder on the desktop).
  *
  * 1. Fast path: serialise the live DOM subtree into an SVG <foreignObject>
  *    (high fidelity in Chromium/Firefox).
@@ -9,11 +10,22 @@
  *    foreignObject taints the canvas.
  */
 import { measureSize, nodeEl } from './geometry'
+import { getEditor } from './store'
+import { isTauri, desktopExport } from '../platform/tauri'
 
 export interface SnapshotOptions {
   scale?: number
   maxSize?: number
   background?: string
+  /** PNG (the default) or JPG; a JPG gets a white background where the layer has none */
+  format?: 'png' | 'jpeg'
+}
+
+/** JPG has no transparency: transparent pixels would turn black */
+const JPEG_BACKGROUND = '#ffffff'
+
+function encode(canvas: HTMLCanvasElement, format: SnapshotOptions['format']) {
+  return format === 'jpeg' ? canvas.toDataURL('image/jpeg', 0.92) : canvas.toDataURL('image/png')
 }
 
 function loadImage(src: string): Promise<HTMLImageElement> {
@@ -26,7 +38,8 @@ function loadImage(src: string): Promise<HTMLImageElement> {
   })
 }
 
-async function viaForeignObject(el: HTMLElement, w: number, h: number, scale: number, bg?: string): Promise<string> {
+/** The layer's DOM as an SVG that wraps it in a <foreignObject>: the PNG fast path, and SVG export. */
+function foreignObjectSVG(el: HTMLElement, w: number, h: number): string {
   const clone = el.cloneNode(true) as HTMLElement
   // shader canvases → images
   const srcCanvases = el.querySelectorAll('canvas')
@@ -49,7 +62,11 @@ async function viaForeignObject(el: HTMLElement, w: number, h: number, scale: nu
   clone.style.transform = 'none'
   clone.style.margin = '0'
   const xhtml = new XMLSerializer().serializeToString(clone)
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}"><foreignObject x="0" y="0" width="100%" height="100%"><div xmlns="http://www.w3.org/1999/xhtml" style="width:${w}px;height:${h}px;font-family:Geist,system-ui,sans-serif;">${xhtml}</div></foreignObject></svg>`
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><foreignObject x="0" y="0" width="100%" height="100%"><div xmlns="http://www.w3.org/1999/xhtml" style="width:${w}px;height:${h}px;font-family:Geist,system-ui,sans-serif;">${xhtml}</div></foreignObject></svg>`
+}
+
+async function viaForeignObject(el: HTMLElement, w: number, h: number, scale: number, bg: string | undefined, format: SnapshotOptions['format']): Promise<string> {
+  const svg = foreignObjectSVG(el, w, h)
   const img = await loadImage('data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg))
   const canvas = document.createElement('canvas')
   canvas.width = Math.max(1, Math.round(w * scale))
@@ -61,7 +78,7 @@ async function viaForeignObject(el: HTMLElement, w: number, h: number, scale: nu
   }
   ctx.scale(scale, scale)
   ctx.drawImage(img, 0, 0)
-  return canvas.toDataURL('image/png') // throws if tainted
+  return encode(canvas, format) // throws if tainted
 }
 
 function roundRectPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number[]) {
@@ -74,7 +91,7 @@ function firstGradientColor(bgImage: string) {
   return /(rgba?\([^)]*\)|#[0-9a-f]{3,8})/i.exec(bgImage)?.[1]
 }
 
-async function viaBoxPainter(el: HTMLElement, w: number, h: number, scale: number, bg?: string): Promise<string> {
+async function viaBoxPainter(el: HTMLElement, w: number, h: number, scale: number, bg: string | undefined, format: SnapshotOptions['format']): Promise<string> {
   const canvas = document.createElement('canvas')
   canvas.width = Math.max(1, Math.round(w * scale))
   canvas.height = Math.max(1, Math.round(h * scale))
@@ -254,7 +271,7 @@ async function viaBoxPainter(el: HTMLElement, w: number, h: number, scale: numbe
     ctx.restore()
   }
   await paint(el)
-  return canvas.toDataURL('image/png')
+  return encode(canvas, format)
 }
 
 export async function snapshotNode(id: string, opts: SnapshotOptions = {}): Promise<string | null> {
@@ -266,29 +283,123 @@ export async function snapshotNode(id: string, opts: SnapshotOptions = {}): Prom
   if (!w || !h) return null
   let scale = opts.scale ?? 1
   if (opts.maxSize) scale = Math.min(scale, opts.maxSize / Math.max(w, h))
+  const bg = opts.background ?? (opts.format === 'jpeg' ? JPEG_BACKGROUND : undefined)
   const hasCanvas = !!el.querySelector('canvas')
   const isWebKit = /AppleWebKit/.test(navigator.userAgent) && !/Chrome|Chromium|Edg/.test(navigator.userAgent)
   if (!hasCanvas && !isWebKit) {
     try {
-      return await viaForeignObject(el, w, h, scale, opts.background)
+      return await viaForeignObject(el, w, h, scale, bg, opts.format)
     } catch {
       /* fall through */
     }
   }
   try {
-    return await viaBoxPainter(el, w, h, scale, opts.background)
+    return await viaBoxPainter(el, w, h, scale, bg, opts.format)
   } catch {
     return null
   }
+}
+
+/**
+ * The layer as a standalone SVG file (a data URL). It wraps the layer's HTML in a
+ * <foreignObject>, so it shows in browsers but not in most design tools.
+ */
+export function snapshotSVG(id: string): string | null {
+  const el = nodeEl(id)
+  const size = measureSize(id)
+  if (!el || !size?.w || !size.h) return null
+  return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent('<?xml version="1.0" encoding="UTF-8"?>\n' + foreignObjectSVG(el, size.w, size.h))
 }
 
 export function dataURLToBase64(url: string) {
   return url.slice(url.indexOf(',') + 1)
 }
 
-export function downloadDataURL(url: string, filename: string) {
+/* ------------------------------------------------------------------ image export */
+
+export type ImageFormat = 'png' | 'jpg' | 'svg'
+
+/** A file name from a layer name, e.g. `Hero card@2x.png` → `Hero-card@2x.png`. */
+export function imageFileName(name: string, format: ImageFormat, scale: number) {
+  const base = name.replace(/[^\w-]+/g, '-').replace(/^-+|-+$/g, '') || 'layer'
+  return `${base}${format !== 'svg' && scale !== 1 ? `@${scale}x` : ''}.${format}`
+}
+
+/** One layer as an image file (a data URL), or null when it can't be rendered. */
+export async function exportImage(id: string, format: ImageFormat, scale: number): Promise<string | null> {
+  if (format === 'svg') return snapshotSVG(id)
+  return snapshotNode(id, { scale, format: format === 'jpg' ? 'jpeg' : 'png' })
+}
+
+export interface ImageFile {
+  path: string
+  url: string
+}
+
+function browserDownload(url: string, filename: string) {
   const a = document.createElement('a')
   a.href = url
   a.download = filename
   a.click()
+}
+
+/**
+ * Save exported images. The desktop app asks for a folder once and writes them all there (a
+ * download link does nothing in its webview); the web downloads them one by one. Resolves to
+ * the desktop folder, or null on the web or when the folder picker was cancelled.
+ */
+export async function saveImages(files: ImageFile[]): Promise<string | null> {
+  if (!files.length) return null
+  if (isTauri) {
+    return desktopExport(
+      files.map((f) => {
+        const base64 = /^data:[^,]*;base64,/.test(f.url)
+        return { path: f.path, contents: base64 ? dataURLToBase64(f.url) : decodeURIComponent(dataURLToBase64(f.url)), base64 }
+      }),
+    )
+  }
+  for (let i = 0; i < files.length; i++) {
+    // browsers drop downloads started in the same instant
+    if (i) await new Promise((r) => setTimeout(r, 200))
+    browserDownload(files[i].url, files[i].path)
+  }
+  return null
+}
+
+/** Save one image and say where it went (desktop) or that it failed. */
+export function downloadDataURL(url: string, filename: string) {
+  saveImages([{ path: filename, url }])
+    .then((where) => where && getEditor().notify(`Exported ${filename} to ${where}`))
+    .catch((e) => getEditor().notify('Export failed: ' + ((e as Error)?.message ?? String(e))))
+}
+
+/**
+ * Every artboard on the current page (visible top-level frames), in one go. Names that
+ * repeat get a number, so no file overwrites another. Resolves to how many were saved and
+ * how many couldn't be rendered.
+ */
+export async function exportArtboards(format: ImageFormat, scale: number): Promise<{ saved: number; failed: number; where: string | null }> {
+  const s = getEditor()
+  const page = s.doc.pages.find((p) => p.id === s.pageId)
+  const ids = (page?.children ?? []).filter((id) => {
+    const n = s.doc.nodes[id]
+    return n && n.type === 'frame' && n.visible
+  })
+  const files: ImageFile[] = []
+  const used = new Map<string, number>()
+  let failed = 0
+  for (const id of ids) {
+    const url = await exportImage(id, format, scale)
+    if (!url) {
+      failed++
+      continue
+    }
+    let path = imageFileName(s.doc.nodes[id].name, format, scale)
+    const n = (used.get(path) ?? 0) + 1
+    used.set(path, n)
+    if (n > 1) path = path.replace(/(@\d+x)?\.\w+$/, (m) => `-${n}${m}`)
+    files.push({ path, url })
+  }
+  const where = await saveImages(files)
+  return { saved: files.length, failed, where }
 }

@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { Ref } from 'react'
+import { createPortal } from 'react-dom'
 import { Search, X } from 'lucide-react'
 import { useEditor, getEditor } from '../store'
-import { COMMANDS, runCommand } from '../commands'
+import { COMMANDS, runCommand, batchNames, applyBatchRename, type RenameRule } from '../commands'
 import { shortcut } from '../../platform/keys'
 
 /* ------------------------------------------------------------------ palette */
@@ -18,7 +20,17 @@ function score(q: string, label: string) {
   return i === b.length ? 1 : 0
 }
 
+/** Editor mounts this; the batch rename dialog rides along with it (it is opened by `edit.rename`). */
 export function CommandPalette() {
+  return (
+    <>
+      <Palette />
+      <BatchRename />
+    </>
+  )
+}
+
+function Palette() {
   const open = useEditor((s) => s.paletteOpen)
   const [q, setQ] = useState('')
   const [idx, setIdx] = useState(0)
@@ -99,6 +111,9 @@ const CTX: (string | '-')[] = [
   'edit.duplicate',
   'edit.delete',
   '-',
+  'edit.copyStyle',
+  'edit.pasteStyle',
+  '-',
   'layout.wrapFlex',
   'layout.wrap',
   'layout.unwrap',
@@ -112,6 +127,10 @@ const CTX: (string | '-')[] = [
   'layer.hide',
   'layer.lock',
   'edit.rename',
+  '-',
+  'edit.selectSameFill',
+  'edit.selectSameFont',
+  'edit.selectSameType',
   '-',
   'view.sel',
   'view.code',
@@ -160,6 +179,100 @@ export function ContextMenu() {
         })}
       </div>
     </div>
+  )
+}
+
+/* ------------------------------------------------------------------ batch rename */
+
+/**
+ * Renames several layers at once: a name pattern where `#` / `$n` is the layer's number in
+ * layer order, and an optional find / replace within the names. One undo step.
+ */
+function BatchRename() {
+  const [ids, setIds] = useState<string[] | null>(null)
+  useEffect(() => {
+    const open = (e: Event) => setIds((e as CustomEvent<{ ids: string[] }>).detail.ids)
+    window.addEventListener('kiln:batch-rename', open)
+    return () => window.removeEventListener('kiln:batch-rename', open)
+  }, [])
+  const close = useCallback(() => setIds(null), [])
+  if (!ids) return null
+  return <BatchRenameDialog key={ids.join(',')} ids={ids} close={close} />
+}
+
+function BatchRenameDialog({ ids, close }: { ids: string[]; close: () => void }) {
+  const [rule, setRule] = useState<RenameRule>({ pattern: '', find: '', replace: '' })
+  const first = useRef<HTMLInputElement>(null)
+  const nodes = useEditor((s) => s.doc.nodes)
+  const live = ids.filter((id) => nodes[id])
+  const olds = live.map((id) => nodes[id].name)
+  const next = batchNames(olds, rule)
+  const changes = next.filter((n, i) => n !== olds[i]).length
+  useEffect(() => {
+    first.current?.focus()
+    const key = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      e.stopPropagation()
+      e.preventDefault()
+      close()
+    }
+    window.addEventListener('keydown', key, true)
+    return () => window.removeEventListener('keydown', key, true)
+  }, [close])
+  const field = (label: string, k: keyof RenameRule, placeholder: string, ref?: Ref<HTMLInputElement>) => (
+    <label style={{ display: 'grid', gap: 6, minWidth: 0 }}>
+      <span className="k-dialog-body">{label}</span>
+      <input
+        ref={ref}
+        className="k-dialog-input"
+        value={rule[k]}
+        placeholder={placeholder}
+        spellCheck={false}
+        autoComplete="off"
+        onChange={(e) => setRule((r) => ({ ...r, [k]: e.target.value }))}
+      />
+    </label>
+  )
+  return createPortal(
+    <div className="k-dialog-backdrop" onPointerDown={(e) => e.target === e.currentTarget && close()}>
+      <form
+        className="k-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Rename ${live.length} layers`}
+        onKeyDown={(e) => e.stopPropagation()}
+        onSubmit={(e) => {
+          e.preventDefault()
+          if (!changes) return
+          applyBatchRename(live, rule)
+          close()
+        }}
+      >
+        <h2>Rename {live.length} layers</h2>
+        {field('Name', 'pattern', 'Keep names · # or $n numbers them', first)}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          {field('Find', 'find', 'Text in the names')}
+          {field('Replace with', 'replace', 'Nothing')}
+        </div>
+        <div className="k-dialog-body" aria-live="polite" style={{ display: 'grid', gap: 2, fontVariantNumeric: 'tabular-nums' }}>
+          {live.slice(0, 4).map((id, i) => (
+            <div key={id} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {olds[i]} <span aria-hidden>→</span> <span style={{ color: 'var(--k-text)' }}>{next[i]}</span>
+            </div>
+          ))}
+          {live.length > 4 && <div>and {live.length - 4} more</div>}
+        </div>
+        <div className="k-dialog-actions">
+          <button type="button" className="k-btn-ghost" onClick={close}>
+            Cancel
+          </button>
+          <button type="submit" className="k-btn-primary" disabled={!changes}>
+            Rename
+          </button>
+        </div>
+      </form>
+    </div>,
+    document.body,
   )
 }
 

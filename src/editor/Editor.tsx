@@ -15,20 +15,68 @@ import { storage } from '../platform/storage'
 import { isTauri, startAgentBridge, onAgentActivity } from '../platform/tauri'
 import { AGENT_TOOLS, runTool, installWindowApi, activityStart, activityEnd, activityReset } from '../agent/tools'
 import { toolLabel } from '../agent/humanize'
-import '../agent/demo'
 import { snapshotNode } from './snapshot'
 import { sampleCanvasColor } from './eyedropper'
 import { registerEyedropper } from '../ui/eyedropper'
 import { ensureFont } from './fonts'
 import type { KDoc } from './types'
+import { isNewerThanApp } from './migrate'
 import './editor.css'
+
+// the dev demo ("Agent: play demo activity") only loads where it can be used
+if (import.meta.env.DEV || localStorage.getItem('kiln.debug') === '1') void import('../agent/demo')
+
+/**
+ * The newest file-card thumbnail. Autosave sends this instead of making one per save: a
+ * snapshot clones the artboard's DOM and encodes a PNG on the main thread, so it is made
+ * only while the browser is idle (see `refreshThumbnail`) and once more when leaving.
+ */
+const thumb = { docId: '', url: undefined as string | undefined, at: 0 }
+/** How old the thumbnail may get while editing before an idle refresh. */
+const THUMB_EVERY_MS = 20_000
+
+const firstBoard = () => getEditor().doc.pages[0]?.children[0]
+
+/** The thumbnail for the open doc: the latest snapshot, else the one the file was saved with. */
+function currentThumbnail() {
+  const d = getEditor().doc
+  return thumb.docId === d.id && thumb.url ? thumb.url : d.thumbnail
+}
+
+/**
+ * When the thumbnail is stale, snapshot the first artboard during idle time. If the file is
+ * still saved when the snapshot is ready, write it straight away (same `updatedAt`, so it never
+ * counts as a newer edit): closing the tab or app right after editing then still leaves the file
+ * card current. If there are new edits, their save carries it instead.
+ */
+function refreshThumbnail() {
+  const docId = getEditor().doc.id
+  // a newly opened file starts its own clock, so it gets its first snapshot straight away
+  if (thumb.docId !== docId) Object.assign(thumb, { docId, url: undefined, at: 0 })
+  if (Date.now() - thumb.at < THUMB_EVERY_MS) return
+  thumb.at = Date.now()
+  const run = () => {
+    const first = firstBoard()
+    if (!first || getEditor().doc.id !== docId) return
+    void snapshotNode(first, { maxSize: 480 })
+      .then((url) => {
+        const s = getEditor()
+        if (!url || s.doc.id !== docId) return
+        Object.assign(thumb, { docId, url })
+        if (s.saveState === 'saved') void storage.save({ ...s.doc, thumbnail: url }).catch(() => {})
+      })
+      .catch(() => {})
+  }
+  if (typeof window.requestIdleCallback === 'function') window.requestIdleCallback(run, { timeout: 5000 })
+  else window.setTimeout(run, 1500) // WebKit (the macOS desktop app) has no requestIdleCallback
+}
 
 /** Save now (with a fresh thumbnail) — used before leaving the editor. */
 export async function flushSave() {
   const s = getEditor()
   if (!s.doc.pages.length) return
-  const first = s.doc.pages[0]?.children[0]
-  const thumbnail = (first && (await snapshotNode(first, { maxSize: 480 }).catch(() => null))) || s.doc.thumbnail
+  const first = firstBoard()
+  const thumbnail = (first && (await snapshotNode(first, { maxSize: 480 }).catch(() => null))) || currentThumbnail()
   const doc: KDoc = { ...getEditor().doc, thumbnail }
   try {
     await storage.save(doc)
@@ -38,40 +86,46 @@ export async function flushSave() {
   }
 }
 
+/**
+ * Saves 700 ms after the last edit. It watches the store directly rather than through a hook:
+ * subscribing the editor to `doc` would re-render the whole editor (top bar, panels, canvas)
+ * on every edit, every keystroke in a text layer and every step of an inspector scrub.
+ */
 function useAutosave() {
-  const doc = useEditor((s) => s.doc)
-  const saveState = useEditor((s) => s.saveState)
   const timer = useRef<number | undefined>(undefined)
-  const lastThumb = useRef(0)
   useEffect(() => {
-    if (saveState !== 'unsaved') return
-    window.clearTimeout(timer.current)
-    timer.current = window.setTimeout(async () => {
-      const s = getEditor()
-      s.set({ saveState: 'saving' })
-      let thumbnail = s.doc.thumbnail
-      if (Date.now() - lastThumb.current > 8000) {
-        lastThumb.current = Date.now()
-        const first = s.doc.pages[0]?.children[0]
-        if (first) thumbnail = (await snapshotNode(first, { maxSize: 480 }).catch(() => null)) ?? thumbnail
-      }
-      const toSave: KDoc = { ...getEditor().doc, thumbnail }
-      try {
-        await storage.save(toSave)
-        if (getEditor().doc.updatedAt === toSave.updatedAt) getEditor().set({ saveState: 'saved' })
-        else getEditor().set({ saveState: 'unsaved' })
-      } catch (e) {
-        getEditor().set({ saveState: 'unsaved' })
-        getEditor().notify('Save failed: ' + (e as Error).message)
-      }
-    }, 700)
-  }, [doc, saveState])
-  useEffect(() => () => window.clearTimeout(timer.current), [])
+    const schedule = () => {
+      window.clearTimeout(timer.current)
+      timer.current = window.setTimeout(async () => {
+        getEditor().set({ saveState: 'saving' })
+        // the save never waits on a snapshot; the thumbnail rides along from the last idle refresh
+        const toSave: KDoc = { ...getEditor().doc, thumbnail: currentThumbnail() }
+        try {
+          await storage.save(toSave)
+          if (getEditor().doc.updatedAt === toSave.updatedAt) getEditor().set({ saveState: 'saved' })
+          else getEditor().set({ saveState: 'unsaved' })
+          refreshThumbnail()
+        } catch (e) {
+          getEditor().set({ saveState: 'unsaved' })
+          getEditor().notify('Save failed: ' + (e as Error).message)
+        }
+      }, 700)
+    }
+    if (getEditor().saveState === 'unsaved') schedule()
+    // same trigger as before: a new doc or a save state change, while there are unsaved edits
+    const unsubscribe = useEditor.subscribe((s, prev) => {
+      if (s.saveState === 'unsaved' && (s.doc !== prev.doc || s.saveState !== prev.saveState)) schedule()
+    })
+    return () => {
+      unsubscribe()
+      window.clearTimeout(timer.current)
+    }
+  }, [])
   // flush on unload
   useEffect(() => {
     const f = (e: BeforeUnloadEvent) => {
       if (getEditor().saveState !== 'saved') {
-        void storage.save(getEditor().doc)
+        void storage.save({ ...getEditor().doc, thumbnail: currentThumbnail() })
         e.preventDefault()
       }
     }
@@ -79,7 +133,7 @@ function useAutosave() {
     return () => {
       window.removeEventListener('beforeunload', f)
       // backstop: leaving the editor by any route never drops pending edits
-      if (getEditor().saveState !== 'saved') void storage.save(getEditor().doc)
+      if (getEditor().saveState !== 'saved') void storage.save({ ...getEditor().doc, thumbnail: currentThumbnail() })
     }
   }, [])
 }
@@ -143,14 +197,23 @@ export function Editor({ fileId, onBack }: { fileId: string; onBack: () => void 
       setStatus('ready')
       return
     }
-    storage.load(fileId).then((doc) => {
-      if (!alive) return
-      if (!doc) return setStatus('missing')
-      for (const n of Object.values(doc.nodes)) if (n.text) ensureFont(n.text.fontFamily)
-      getEditor().loadDoc(doc)
-      setStatus('ready')
-      requestAnimationFrame(() => requestAnimationFrame(() => zoomToFit()))
-    })
+    storage
+      .load(fileId)
+      .then((doc) => {
+        if (!alive) return
+        if (!doc) return setStatus('missing')
+        for (const n of Object.values(doc.nodes)) if (n.text) ensureFont(n.text.fontFamily)
+        getEditor().loadDoc(doc)
+        setStatus('ready')
+        if (isNewerThanApp(doc)) getEditor().notify('This file was saved by a newer Kiln. Update Kiln before editing it, or some changes may not show.')
+        requestAnimationFrame(() => requestAnimationFrame(() => zoomToFit()))
+      })
+      .catch((e) => {
+        if (!alive) return
+        console.error('Kiln: could not open the file', e)
+        getEditor().notify((e as Error).message || 'Could not open the file')
+        setStatus('missing')
+      })
     return () => {
       alive = false
     }

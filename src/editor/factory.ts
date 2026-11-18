@@ -1,4 +1,5 @@
 import { nanoid } from 'nanoid'
+import { DOC_VERSION } from './migrate'
 import type { Fill, KDoc, KNode, Layout, NodeType, Page, Shadow, ShaderSpec, TextStyle, Token } from './types'
 
 export const uid = (n = 10) => nanoid(n)
@@ -138,6 +139,7 @@ export function emptyDoc(name = 'Untitled'): KDoc {
   const page = createPage('Page 1')
   const now = Date.now()
   return {
+    version: DOC_VERSION,
     id: uid(12),
     name,
     createdAt: now,
