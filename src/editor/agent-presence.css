@@ -1,0 +1,231 @@
+/* ==========================================================================
+   Agent presence on the canvas: one cursor, a focus outline on the nodes the
+   agent is touching, and a short afterglow on nodes it has just changed.
+   Ember only, and nothing loops: every animation runs once and stops.
+   ========================================================================== */
+
+/* ---------- cursor: one per agent, glides between targets */
+.k-ap-cursor {
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  transition: transform 420ms var(--k-ease);
+  will-change: transform;
+}
+.k-ap-cursor-in {
+  position: absolute;
+  left: 0;
+  top: 0;
+  animation: k-ap-in 220ms var(--k-ease) both;
+  transform-origin: 2px 2px;
+}
+.k-ap-cursor-in.is-leaving {
+  animation: k-ap-out 600ms ease-out both;
+}
+.k-ap-arrow {
+  position: absolute;
+  left: -2px;
+  top: -2px;
+  display: block;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.45));
+}
+.k-ap-pill {
+  position: absolute;
+  left: 16px;
+  top: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  max-width: 300px;
+  padding: 0 10px 0 6px;
+  border-radius: 999px;
+  background: rgba(24, 14, 10, 0.9);
+  box-shadow: inset 0 0 0 1px rgba(255, 91, 31, 0.5), 0 6px 16px -4px rgba(0, 0, 0, 0.5);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  color: #ffd9c9;
+  font: 500 11px/1 var(--k-ui);
+  letter-spacing: 0.005em;
+  white-space: nowrap;
+}
+.k-ap-cursor.is-flip .k-ap-pill {
+  left: auto;
+  right: 16px;
+}
+.k-ap-cursor.is-up .k-ap-pill {
+  top: auto;
+  bottom: 14px;
+}
+.k-ap-pill-icon {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--k-ember);
+  color: #fff;
+}
+.k-ap-pill-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  animation: k-ap-text 240ms var(--k-ease) both;
+}
+.k-ap-pill-text b {
+  font-weight: 600;
+  color: #fff;
+}
+.k-ap-sep {
+  color: rgba(255, 170, 130, 0.7);
+}
+
+/* ---------- focus: outline, corner ticks and a faint wash on the nodes in use */
+.k-ap-focus {
+  position: absolute;
+  border-radius: 3px;
+  background: rgba(255, 91, 31, 0.04);
+  box-shadow: inset 0 0 0 1.5px var(--k-ember);
+  overflow: visible;
+  animation: k-ap-in 200ms var(--k-ease) both;
+}
+.k-ap-focus::after {
+  /* one light pass across the node on arrival, then still */
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(100deg, transparent 35%, rgba(255, 190, 160, 0.22) 50%, transparent 65%);
+  background-size: 250% 100%;
+  background-repeat: no-repeat;
+  background-position: 100% 0;
+  animation: k-ap-sweep 700ms linear 1 both;
+  pointer-events: none;
+}
+.k-ap-tick {
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  border: 0 solid var(--k-ember);
+}
+.k-ap-tick.tl {
+  left: -3px;
+  top: -3px;
+  border-left-width: 2px;
+  border-top-width: 2px;
+}
+.k-ap-tick.tr {
+  right: -3px;
+  top: -3px;
+  border-right-width: 2px;
+  border-top-width: 2px;
+}
+.k-ap-tick.bl {
+  left: -3px;
+  bottom: -3px;
+  border-left-width: 2px;
+  border-bottom-width: 2px;
+}
+.k-ap-tick.br {
+  right: -3px;
+  bottom: -3px;
+  border-right-width: 2px;
+  border-bottom-width: 2px;
+}
+
+/* ---------- afterglow: nodes changed in the last moment fade back to nothing */
+.k-ap-glow {
+  position: absolute;
+  border-radius: 3px;
+  pointer-events: none;
+  animation: k-ap-glow 1200ms ease-out both;
+}
+
+@keyframes k-ap-in {
+  from {
+    opacity: 0;
+    transform: scale(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@keyframes k-ap-out {
+  to {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+@keyframes k-ap-text {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes k-ap-sweep {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+@keyframes k-ap-glow {
+  from {
+    background: rgba(255, 91, 31, 0.12);
+    box-shadow: inset 0 0 0 1.5px var(--k-ember), 0 0 18px rgba(255, 91, 31, 0.5);
+  }
+  to {
+    background: rgba(255, 91, 31, 0);
+    box-shadow: inset 0 0 0 1.5px rgba(255, 91, 31, 0), 0 0 18px rgba(255, 91, 31, 0);
+  }
+}
+
+/* ---------- reduced motion: no gliding, no sweep; things just appear and fade */
+@media (prefers-reduced-motion: reduce) {
+  .k-ap-cursor {
+    transition: none;
+  }
+  .k-ap-cursor-in {
+    animation: k-ap-fade 160ms linear both;
+  }
+  .k-ap-cursor-in.is-leaving {
+    animation: k-ap-fade-out 400ms linear both;
+  }
+  .k-ap-focus {
+    animation: k-ap-fade 160ms linear both;
+  }
+  .k-ap-focus::after {
+    animation: none;
+    display: none;
+  }
+  .k-ap-pill-text {
+    animation: k-ap-fade 160ms linear both;
+  }
+  .k-ap-glow {
+    animation: k-ap-fade-out 1200ms linear both;
+  }
+}
+@keyframes k-ap-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes k-ap-fade-out {
+  to {
+    opacity: 0;
+  }
+}

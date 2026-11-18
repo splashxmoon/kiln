@@ -1,0 +1,9 @@
+name: Idea
+description: Something you'd like Kiln to do
+labels: [idea]
+body:
+  - type: textarea
+    attributes: { label: What you want to do, description: "The design job, not the feature. For example: hand a frame to Codex and get a React page back." }
+    validations: { required: true }
+  - type: textarea
+    attributes: { label: How you do it today }

@@ -1,0 +1,41 @@
+[package]
+name = "kiln"
+version = "0.1.0"
+description = "Kiln: an HTML/CSS-native design tool"
+authors = ["Kiln"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "kiln_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["net", "sync", "time", "macros", "fs", "process", "io-util", "rt"] }
+arboard = { version = "3", default-features = false }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Job objects, so cancelling an agent run kills its whole process tree (already in the tree via tauri)
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

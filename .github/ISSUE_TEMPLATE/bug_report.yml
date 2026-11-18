@@ -1,0 +1,16 @@
+name: Bug report
+description: Something in Kiln doesn't work
+labels: [bug]
+body:
+  - type: textarea
+    attributes: { label: What happened, description: "What you did, what you expected, what you saw." }
+    validations: { required: true }
+  - type: textarea
+    attributes: { label: Steps to reproduce }
+  - type: dropdown
+    attributes: { label: Where, options: [Desktop app (Mac), Web app] }
+    validations: { required: true }
+  - type: input
+    attributes: { label: Kiln version and OS, placeholder: "0.1.0, macOS 15.2" }
+  - type: textarea
+    attributes: { label: Screenshot or exported code, description: Optional, but it helps a lot. }

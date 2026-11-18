@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-agent-cli-connect"
+description = "Enables the agent_cli_connect command without any pre-configured scope."
+commands.allow = ["agent_cli_connect"]
+
+[[permission]]
+identifier = "deny-agent-cli-connect"
+description = "Denies the agent_cli_connect command without any pre-configured scope."
+commands.deny = ["agent_cli_connect"]

@@ -1,0 +1,18 @@
+/* Export code panel: use the whole side panel width and wrap long lines.
+   Selectors are scoped under .k-code so they win without depending on stylesheet order. */
+
+.k-code .k-code-card {
+  margin: 12px 12px 0;
+}
+
+.k-code .k-code-pre {
+  padding: 12px;
+  /* wrap instead of scrolling sideways; keep existing indentation and newlines */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow-x: hidden;
+}
+
+.k-code .k-code-actions {
+  padding: 12px 12px 16px;
+}

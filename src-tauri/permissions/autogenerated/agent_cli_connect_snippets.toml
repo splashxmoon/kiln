@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-agent-cli-connect-snippets"
+description = "Enables the agent_cli_connect_snippets command without any pre-configured scope."
+commands.allow = ["agent_cli_connect_snippets"]
+
+[[permission]]
+identifier = "deny-agent-cli-connect-snippets"
+description = "Denies the agent_cli_connect_snippets command without any pre-configured scope."
+commands.deny = ["agent_cli_connect_snippets"]

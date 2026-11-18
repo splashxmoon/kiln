@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-agent-register-tools"
+description = "Enables the agent_register_tools command without any pre-configured scope."
+commands.allow = ["agent_register_tools"]
+
+[[permission]]
+identifier = "deny-agent-register-tools"
+description = "Denies the agent_register_tools command without any pre-configured scope."
+commands.deny = ["agent_register_tools"]

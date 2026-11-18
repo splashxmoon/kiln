@@ -1,0 +1,476 @@
+/* Home screen: sidebar, projects, moving files, Trash, toast. Uses the editor tokens from editor.css. */
+
+.k-home {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  user-select: none;
+}
+.k-home-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.k-home-main {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+}
+.k-home-main .k-files-main {
+  margin: 0;
+  width: 100%;
+  max-width: 1240px;
+  padding: 32px 32px 80px;
+}
+
+/* ---- sidebar ---------------------------------------------------------------- */
+
+.k-home-side {
+  width: 232px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 14px 10px 12px;
+  overflow-y: auto;
+  background: var(--k-panel);
+  border-right: 1px solid var(--k-line);
+}
+.k-side-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 7px;
+  color: var(--k-muted);
+  text-decoration: none;
+  transition: background 0.12s, color 0.12s, box-shadow 0.12s;
+}
+.k-side-item:hover {
+  background: var(--k-raise);
+  color: var(--k-text);
+}
+.k-side-item:active {
+  background: var(--k-raise-2);
+}
+.k-side-item.is-active {
+  background: var(--k-ember-soft);
+  color: var(--k-text);
+}
+.k-side-item.is-active .k-side-icon {
+  color: var(--k-ember-2);
+}
+.k-side-item:focus-visible {
+  outline: 2px solid var(--k-ember);
+  outline-offset: -2px;
+}
+.k-side-item.is-drop-over {
+  background: var(--k-ember-soft);
+  box-shadow: inset 0 0 0 1px var(--k-ember);
+  color: var(--k-text);
+}
+.k-side-icon {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  flex: none;
+  color: var(--k-faint);
+}
+.k-side-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 13px;
+}
+.k-side-count {
+  font-size: 11px;
+  color: var(--k-faint);
+  font-variant-numeric: tabular-nums;
+}
+.k-side-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 26px;
+  margin: 16px 0 2px;
+  padding: 0 8px 0 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--k-faint);
+}
+.k-side-add {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  color: var(--k-muted);
+  transition: background 0.12s, color 0.12s;
+}
+.k-side-add:hover {
+  background: var(--k-raise);
+  color: var(--k-text);
+}
+.k-side-add:active {
+  background: var(--k-raise-2);
+}
+.k-side-add:focus-visible {
+  outline: 2px solid var(--k-ember);
+}
+.k-side-empty {
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--k-faint);
+}
+.k-side-foot {
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid var(--k-line);
+}
+.k-proj-dot-sm {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+
+/* ---- project header --------------------------------------------------------- */
+
+.k-proj-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+}
+.k-proj-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  flex: none;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.15);
+  transition: transform 0.12s;
+}
+.k-proj-dot:hover {
+  transform: scale(1.15);
+}
+.k-proj-dot:focus-visible {
+  outline: 2px solid var(--k-ember);
+  outline-offset: 3px;
+}
+.k-proj-title {
+  margin: 0;
+  min-width: 0;
+  font-size: 22px;
+  font-weight: 600;
+}
+.k-proj-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 2px 6px;
+  margin-left: -6px;
+  border-radius: 6px;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  font: inherit;
+  color: var(--k-text);
+  cursor: text;
+  transition: background 0.12s;
+}
+.k-proj-name:focus-visible {
+  outline: 2px solid var(--k-ember);
+  outline-offset: 1px;
+}
+.k-proj-name:hover {
+  background: var(--k-raise);
+}
+.k-proj-name-edit {
+  color: var(--k-faint);
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.k-proj-name:hover .k-proj-name-edit {
+  opacity: 1;
+}
+.k-proj-name-input {
+  height: 32px;
+  min-width: 260px;
+  padding: 0 8px;
+  margin-left: -8px;
+  border-radius: 6px;
+  background: var(--k-panel-2);
+  border: 1px solid var(--k-ember);
+  color: var(--k-text);
+  font: inherit;
+  font-size: 22px;
+  font-weight: 600;
+  outline: none;
+  user-select: text;
+}
+.k-proj-count {
+  font-size: 12px;
+  white-space: nowrap;
+}
+.k-proj-spacer {
+  flex: 1;
+}
+.k-proj-tabs {
+  display: flex;
+  gap: 4px;
+  margin: 14px 0 22px;
+  border-bottom: 1px solid var(--k-line);
+}
+.k-proj-tab {
+  position: relative;
+  height: 34px;
+  padding: 0 12px;
+  color: var(--k-muted);
+  font-size: 13px;
+  transition: color 0.12s;
+}
+.k-proj-tab:hover:not(:disabled) {
+  color: var(--k-text);
+}
+.k-proj-tab.is-active {
+  color: var(--k-text);
+}
+.k-proj-tab.is-active::after {
+  content: '';
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--k-ember);
+}
+.k-proj-tab:disabled {
+  cursor: default;
+  color: var(--k-faint);
+}
+.k-proj-tab:focus-visible {
+  outline: 2px solid var(--k-ember);
+  outline-offset: -2px;
+  border-radius: 6px;
+}
+.k-proj-soon {
+  font-size: 11px;
+  color: var(--k-faint);
+}
+.k-files-head-spacer {
+  flex: 1;
+}
+.k-project-empty {
+  align-items: center;
+  text-align: center;
+}
+.k-project-empty p {
+  margin: 0 0 6px;
+}
+.k-project-empty .k-btn-primary {
+  margin-top: 14px;
+}
+.k-project-empty-dot {
+  display: block;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  margin: 0 auto 12px;
+  opacity: 0.85;
+}
+
+/* ---- delete project dialog: three actions on one line ------------------------ */
+
+.k-dialog.k-proj-delete-dialog {
+  width: min(520px, calc(100vw - 48px));
+  max-width: none;
+}
+.k-proj-delete-dialog .k-dialog-actions button {
+  white-space: nowrap;
+}
+
+/* ---- colour popover --------------------------------------------------------- */
+
+.k-proj-colour-pop {
+  position: absolute;
+  z-index: 50;
+  padding: 8px;
+  background: var(--k-float);
+  border: 1px solid var(--k-line-2);
+  border-radius: 10px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.3);
+}
+.k-proj-swatches {
+  display: grid;
+  grid-template-columns: repeat(4, 26px);
+  gap: 8px;
+}
+.k-proj-swatch {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  transition: transform 0.12s, box-shadow 0.12s;
+}
+.k-proj-swatch:hover {
+  transform: scale(1.1);
+}
+.k-proj-swatch.is-on {
+  box-shadow: 0 0 0 2px var(--k-float), 0 0 0 3.5px var(--k-text);
+}
+.k-proj-swatch:focus-visible {
+  outline: 2px solid var(--k-ember);
+  outline-offset: 2px;
+}
+
+/* ---- move to… and card project tags ----------------------------------------- */
+
+.k-home-menu-heading {
+  padding: 6px 8px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--k-faint);
+}
+.k-home-menu-hint {
+  padding: 6px 8px 8px;
+  font-size: 12px;
+  color: var(--k-faint);
+  max-width: 220px;
+}
+.k-home-menu-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.k-home-move-menu button.is-current {
+  color: var(--k-text);
+}
+.k-file-project {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--k-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.k-file-project i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+}
+
+/* ---- drag ------------------------------------------------------------------- */
+
+.k-drag-ghost {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 300;
+  max-width: 220px;
+  padding: 7px 11px;
+  border-radius: 8px;
+  background: var(--k-float);
+  border: 1px solid var(--k-ember);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  color: var(--k-text);
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  will-change: transform;
+}
+.is-dragging-card,
+.is-dragging-card * {
+  cursor: grabbing !important;
+}
+.k-file-card.is-dragging-source {
+  opacity: 0.5;
+}
+
+/* ---- Trash ------------------------------------------------------------------ */
+
+.k-file-thumb.is-dim img,
+.k-file-thumb.is-dim .k-file-thumb-empty {
+  opacity: 0.4;
+  filter: grayscale(0.7);
+}
+.k-trash-card {
+  cursor: default;
+}
+.k-trash-card:hover .k-file-thumb {
+  border-color: var(--k-line);
+}
+.k-trash-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 2px 0;
+}
+.k-trash-actions .k-btn-ghost {
+  height: 26px;
+  padding: 0 9px;
+  font-size: 12px;
+}
+.k-trash-forever {
+  width: 26px;
+  padding: 0 !important;
+  justify-content: center;
+}
+.k-trash-forever:hover {
+  color: var(--k-bad);
+  border-color: rgba(255, 107, 91, 0.5);
+}
+
+/* ---- toast ------------------------------------------------------------------ */
+
+.k-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 22px;
+  z-index: 250;
+  max-width: min(520px, calc(100vw - 48px));
+  transform: translateX(-50%);
+  padding: 9px 14px;
+  border-radius: 10px;
+  background: var(--k-float);
+  border: 1px solid var(--k-line-2);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  color: var(--k-text);
+  font-size: 13px;
+  text-align: center;
+  pointer-events: none;
+  animation: k-toast-in 0.18s var(--k-ease);
+}
+@keyframes k-toast-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 6px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .k-toast {
+    animation: none;
+  }
+}

@@ -1,0 +1,69 @@
+/* Windows caption buttons: Windows 11 proportions (46px wide, full bar height, 10px glyphs),
+   in Kiln's colours. They sit flush with the window's right edge, so each bar cancels its
+   right padding. */
+.k-winctl {
+  display: flex;
+  flex: none;
+  align-self: stretch;
+  height: var(--k-winctl-h, 43px);
+  margin-left: 4px;
+  margin-right: calc(-1 * var(--k-winctl-inset, 8px));
+}
+.k-winctl button {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--k-text, #e8e6e1);
+  opacity: 0.86;
+  cursor: default;
+  transition: background-color 0.1s, color 0.1s, opacity 0.1s;
+}
+.k-winctl svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1;
+  shape-rendering: geometricPrecision;
+}
+.k-winctl button:hover {
+  background: rgba(255, 255, 255, 0.07);
+  opacity: 1;
+}
+.k-winctl button:active {
+  background: rgba(255, 255, 255, 0.04);
+}
+.k-winctl button.is-close:hover {
+  background: #c42b1c;
+  color: #fff;
+}
+.k-winctl button.is-close:active {
+  background: #b0291b;
+  color: rgba(255, 255, 255, 0.8);
+}
+.k-winctl button:focus-visible {
+  outline-offset: -2px;
+}
+
+/* where each bar puts them */
+.k-topbar .k-winctl {
+  --k-winctl-inset: 8px;
+}
+.k-files-top .k-winctl {
+  --k-winctl-inset: 12px;
+}
+.k-preview-head .k-winctl {
+  --k-winctl-h: 39px;
+  --k-winctl-inset: 10px;
+  margin-left: 6px;
+  border-left: 1px solid var(--k-line-2, rgba(255, 255, 255, 0.08));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .k-winctl button {
+    transition: none;
+  }
+}

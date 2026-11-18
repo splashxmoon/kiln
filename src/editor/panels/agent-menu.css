@@ -1,0 +1,488 @@
+/* ---------- agent settings popover (AgentMenu.tsx)
+   Flow: header and tabs stay put, the list scrolls, the chosen agent opens in place. */
+.k-am {
+  width: 372px;
+  max-height: min(78vh, 680px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 0;
+  border-radius: 16px;
+  background: var(--k-float);
+  border: 1px solid var(--k-line-2);
+  box-shadow: var(--k-shadow-float);
+}
+.k-am-inner {
+  display: flex;
+  flex-direction: column;
+}
+
+/* fixed top: title and the Subscriptions / API keys switch */
+.k-am-top {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--k-float);
+  border-bottom: 1px solid var(--k-line);
+}
+.k-am-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 12px 10px 16px;
+}
+.k-am-title {
+  font: 600 14px/1.3 var(--k-ui);
+  letter-spacing: -0.01em;
+  color: var(--k-text);
+}
+.k-am-sub {
+  margin: 2px 0 0;
+  font: 400 12px/1.45 var(--k-ui);
+  color: var(--k-faint);
+}
+.k-am-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px;
+  margin: 0 12px 12px;
+  padding: 2px;
+  border-radius: 9px;
+  background: var(--k-panel-2);
+  box-shadow: inset 0 0 0 1px var(--k-line);
+}
+.k-am-tabs button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 28px;
+  border-radius: 7px;
+  font: 500 12px/1 var(--k-ui);
+  color: var(--k-muted);
+  transition: background-color var(--k-dur) var(--k-ease), color var(--k-dur) var(--k-ease);
+}
+.k-am-tabs button:hover:not(.is-on) {
+  color: var(--k-text);
+}
+.k-am-tabs button.is-on {
+  color: var(--k-text);
+  background: var(--k-raise);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35), inset 0 0 0 1px var(--k-line-2);
+}
+.k-am-tab-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--k-good);
+}
+
+/* the scrolling list */
+.k-am-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 8px 10px;
+}
+.k-am-hintline {
+  margin: 0 8px 2px;
+  font: 400 11.5px/1.45 var(--k-ui);
+  color: var(--k-faint);
+}
+.k-am-callout {
+  margin: 0 4px 4px;
+  padding: 9px 11px;
+  border-radius: 9px;
+  font: 400 11.5px/1.5 var(--k-ui);
+  color: var(--k-muted);
+  background: var(--k-panel-2);
+  border: 1px solid var(--k-line);
+}
+.k-am-group {
+  margin: 8px 8px 0;
+  font: 600 10.5px/1 var(--k-ui);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--k-faint-2);
+}
+.k-am-note {
+  margin: 0;
+  font: 400 11.5px/1.5 var(--k-ui);
+  color: var(--k-faint);
+}
+.k-am-note code,
+.k-am-callout code,
+.k-am-more code {
+  font: 11px/1.4 var(--k-mono);
+  color: var(--k-muted);
+}
+
+/* one agent: row, and its settings when chosen */
+.k-am-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.k-am-item {
+  border-radius: 12px;
+  border: 1px solid transparent;
+  transition: background-color var(--k-dur) var(--k-ease), border-color var(--k-dur) var(--k-ease);
+}
+.k-am-item.is-active {
+  background: var(--k-float-2);
+  border-color: var(--k-line-2);
+  box-shadow: 0 1px 0 rgb(255 255 255 / 0.03) inset, 0 6px 18px -10px rgb(0 0 0 / 0.6);
+}
+.k-am-row {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto auto;
+  align-items: center;
+  column-gap: 11px;
+  width: 100%;
+  padding: 9px 10px;
+  border-radius: 11px;
+  text-align: left;
+  color: var(--k-text);
+  transition: background-color var(--k-dur) var(--k-ease);
+}
+.k-am-item:not(.is-active) .k-am-row:hover:not(:disabled) {
+  background: var(--k-raise);
+}
+.k-am-row:focus-visible {
+  outline: 2px solid var(--k-ember);
+  outline-offset: -2px;
+}
+/* unavailable rows dim their own parts (below), not the whole button on top of that */
+.k-am .k-am-row:disabled {
+  opacity: 1;
+  cursor: default;
+}
+/* unavailable agents: one quiet line each */
+.k-am-item.is-off:not(.is-active) .k-am-row-name {
+  color: var(--k-faint);
+}
+.k-am-item.is-off:not(.is-active) .k-am-row-sub {
+  display: none;
+}
+.k-am-item.is-off:not(.is-active) .k-am-row {
+  padding-block: 6px;
+}
+.k-am-mark {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  background: linear-gradient(180deg, rgb(255 255 255 / 0.07), rgb(255 255 255 / 0.03));
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.07);
+  color: var(--k-text);
+}
+.k-am-item.is-off:not(.is-active) .k-am-mark {
+  opacity: 0.6;
+  filter: grayscale(1);
+}
+.k-am-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.k-am-row-name {
+  font: 500 13px/1.3 var(--k-ui);
+  color: var(--k-text);
+}
+.k-am-row-sub {
+  font: 400 11.5px/1.35 var(--k-ui);
+  color: var(--k-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.k-am-pill {
+  padding: 3px 8px;
+  border-radius: 99px;
+  font: 500 10.5px/1.2 var(--k-ui);
+  white-space: nowrap;
+  color: var(--k-faint-2);
+  background: rgb(255 255 255 / 0.04);
+}
+.k-am-pill.is-good {
+  color: var(--k-good);
+  background: rgba(127, 196, 154, 0.1);
+}
+.k-am-pill.is-warn {
+  color: #e9b872;
+  background: rgba(233, 184, 114, 0.1);
+}
+.k-am-pill.is-bad {
+  color: var(--k-bad);
+  background: rgba(255, 107, 91, 0.1);
+}
+/* radio on the right: an empty ring, filled ember with a check when chosen */
+.k-am-radio {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1.5px var(--k-line-2);
+  color: #fff;
+  transition: background-color var(--k-dur) var(--k-ease), box-shadow var(--k-dur) var(--k-ease);
+}
+.k-am-item:not(.is-off) .k-am-row:hover .k-am-radio:not(.is-on) {
+  box-shadow: inset 0 0 0 1.5px var(--k-faint-2);
+}
+.k-am-item.is-off:not(.is-active) .k-am-radio {
+  display: none;
+}
+.k-am-radio.is-on {
+  background: var(--k-ember);
+  box-shadow: 0 0 0 3px var(--k-ember-soft);
+}
+/* block drops the inline baseline gap; lucide's check sits about half a unit above its box centre */
+.k-am-radio svg {
+  display: block;
+  transform: translateY(0.25px);
+}
+
+/* option icons in the Model and Reasoning dropdowns (the listbox is portalled, so these aren't scoped to .k-am) */
+.k-effort-icon,
+.k-am-opt-icon {
+  flex: none;
+  color: var(--k-muted);
+}
+.k-option.is-selected .k-effort-icon,
+.k-select .k-effort-icon {
+  color: var(--k-ember);
+}
+
+/* the chosen agent's settings, opened under its row */
+.k-am-detail {
+  margin: 0 10px;
+  padding: 12px 0 12px;
+  border-top: 1px solid var(--k-line);
+  animation: k-am-open 0.18s var(--k-ease) both;
+}
+@keyframes k-am-open {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+}
+.k-am-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.k-am-pair {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+}
+.k-am-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.k-am-label {
+  font: 500 11px/1 var(--k-ui);
+  color: var(--k-faint);
+}
+.k-am-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  height: 11px;
+}
+/* refresh the model list: a quiet icon beside the label, spinning while it asks */
+.k-am-refresh {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  margin: -4px -3px -4px 0;
+  border-radius: 5px;
+  color: var(--k-faint) !important;
+  transition: color 0.12s, background 0.12s;
+}
+.k-am-refresh:hover:not(:disabled) {
+  color: var(--k-text) !important;
+  background: var(--k-raise) !important;
+}
+.k-am-refresh:focus-visible {
+  outline: 1.5px solid var(--k-ember);
+  outline-offset: 1px;
+}
+.k-am-refresh:disabled {
+  cursor: default;
+}
+.k-am-refresh.is-busy svg {
+  animation: k-am-spin 0.9s linear infinite;
+}
+@keyframes k-am-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .k-am-refresh.is-busy svg {
+    animation: none;
+    opacity: 0.5;
+  }
+}
+.k-am-hint {
+  font: 400 11px/1.3 var(--k-ui);
+  color: var(--k-faint-2);
+}
+/* fields read as fields: a sunken well with a visible edge, ember when open or focused */
+.k-am .k-select,
+.k-am .k-text-input {
+  flex: none;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  background: var(--k-bg);
+  border: 1px solid var(--k-line-2);
+  font: 500 12px/1 var(--k-ui);
+  color: var(--k-text);
+  transition: border-color var(--k-dur) var(--k-ease), box-shadow var(--k-dur) var(--k-ease);
+}
+.k-am .k-text-input {
+  resize: none;
+}
+.k-am .k-text-input.k-mono {
+  font: 11.5px/1 var(--k-mono);
+}
+.k-am .k-text-input::placeholder {
+  color: var(--k-faint-2);
+}
+.k-am .k-select:hover:not(:disabled),
+.k-am .k-text-input:hover {
+  border-color: #46433d;
+}
+.k-am .k-select.is-open,
+.k-am .k-text-input:focus {
+  border-color: var(--k-ember);
+  box-shadow: 0 0 0 3px var(--k-ember-soft);
+}
+
+/* register Kiln in the CLI's own config */
+.k-am-connect-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  text-align: left;
+  color: var(--k-muted);
+  background: rgb(255 255 255 / 0.03);
+  border: 1px dashed var(--k-line-2);
+  transition: background-color var(--k-dur) var(--k-ease), border-color var(--k-dur) var(--k-ease), color var(--k-dur) var(--k-ease);
+}
+.k-am-connect-btn:hover:not(:disabled) {
+  color: var(--k-text);
+  border-style: solid;
+  background: var(--k-raise);
+}
+.k-am-connect-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.k-am-connect-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.k-am-connect-title {
+  font: 500 12px/1.3 var(--k-ui);
+  color: var(--k-text);
+}
+.k-am-connect-sub {
+  font: 400 11px/1.35 var(--k-ui);
+  color: var(--k-faint-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.k-am-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  align-self: flex-start;
+  font: 500 12px/1.3 var(--k-ui);
+  color: var(--k-ember-2);
+  text-decoration: none;
+}
+.k-am-link:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.k-am-warn,
+.k-am-err {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font: 400 11.5px/1.5 var(--k-ui);
+}
+.k-am-warn {
+  color: #e9b872;
+  background: rgba(233, 184, 114, 0.08);
+}
+.k-am-err {
+  color: var(--k-bad);
+  background: rgba(255, 107, 91, 0.08);
+  font-family: var(--k-mono);
+  word-break: break-word;
+}
+
+/* collapsed at the bottom: reaching Kiln from outside agents */
+.k-am-foot {
+  padding: 4px 12px 12px;
+  border-top: 1px solid var(--k-line);
+}
+.k-am-more > .k-disclosure-head {
+  width: 100%;
+  padding: 10px 4px 6px;
+  font: 500 12px/1 var(--k-ui);
+  color: var(--k-muted);
+}
+.k-am-more > .k-disclosure-head:hover {
+  color: var(--k-text);
+}
+.k-am-more-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 0 2px;
+}
+.k-am-copy {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 6px 6px 6px 10px;
+  border-radius: 8px;
+  background: var(--k-panel-2);
+  border: 1px solid var(--k-line);
+}
+.k-am-copy code,
+.k-am-copy pre {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 11px/1.5 var(--k-mono);
+  color: var(--k-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .k-am-detail {
+    animation: none;
+  }
+}

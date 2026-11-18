@@ -1,0 +1,305 @@
+/* Tokens tab: a header with count and +, roomy rows (swatch, name over its CSS variable
+   and usage, hex), an inline card to add one, an empty state, and a quiet footnote. */
+.k-tokens.k-tk {
+  padding: 4px 8px 16px;
+  display: flex;
+  flex-direction: column;
+}
+
+.k-tk-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 2px 0 6px;
+}
+.k-tk-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--k-faint);
+}
+.k-tk-count {
+  font: 10px/16px var(--k-mono);
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--k-panel-2);
+  color: var(--k-faint);
+}
+.k-tk-add-btn {
+  margin-left: auto;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  color: var(--k-faint) !important;
+  transition: background 0.12s, color 0.12s;
+}
+.k-tk-add-btn:hover,
+.k-tk-add-btn.is-on {
+  color: var(--k-text) !important;
+  background: var(--k-raise) !important;
+}
+.k-tk-add-btn svg {
+  transition: transform 0.18s var(--k-ease, ease);
+}
+.k-tk-add-btn.is-on svg {
+  transform: rotate(45deg);
+}
+
+/* rows */
+.k-tk-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.k-tk-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 6px 8px 6px 6px;
+  border-radius: 8px;
+  transition: background 0.12s;
+}
+.k-tk-row:hover,
+.k-tk-row:focus-within {
+  background: var(--k-panel-2);
+}
+.k-swatch.k-tk-swatch {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+.k-swatch.k-tk-swatch:hover,
+.k-swatch.k-tk-swatch.is-open {
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12), 0 0 0 2px var(--k-panel), 0 0 0 3.5px var(--k-ember);
+}
+.k-tk-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.k-tk-name {
+  width: 100%;
+  min-width: 0;
+  height: 20px;
+  margin-left: -4px;
+  padding: 0 4px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  outline: none;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--k-text);
+  text-overflow: ellipsis;
+  user-select: text;
+  transition: border-color 0.12s, background 0.12s;
+}
+.k-tk-name:hover {
+  border-color: var(--k-line-2);
+}
+.k-tk-name:focus {
+  border-color: var(--k-ember);
+  background: var(--k-bg);
+}
+.k-tk-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 10.5px;
+  line-height: 14px;
+  color: var(--k-faint-2);
+  white-space: nowrap;
+}
+.k-tk-var {
+  font-family: var(--k-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.k-tk-uses {
+  flex: none;
+  color: var(--k-faint);
+}
+.k-tk-uses::before {
+  content: '·';
+  margin-right: 6px;
+  color: var(--k-faint-2);
+}
+.k-tk-uses.is-unused {
+  color: var(--k-faint-2);
+}
+.k-tk-hex {
+  font: 11px var(--k-mono);
+  letter-spacing: 0.02em;
+  color: var(--k-faint);
+  transition: opacity 0.12s;
+}
+.k-tk-del {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  translate: 0 -50%;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  color: var(--k-faint) !important;
+  opacity: 0;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
+}
+.k-tk-row:hover .k-tk-del,
+.k-tk-row:focus-within .k-tk-del {
+  opacity: 1;
+}
+.k-tk-row:hover .k-tk-hex,
+.k-tk-row:focus-within .k-tk-hex {
+  opacity: 0;
+}
+.k-tk-del:hover {
+  color: var(--k-bad) !important;
+  background: var(--k-raise) !important;
+}
+
+/* new token card */
+.k-tk-draft {
+  margin-top: 6px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-radius: 10px;
+  background: var(--k-panel-2);
+  border: 1px solid var(--k-line-2);
+  animation: k-tk-in 0.18s var(--k-ease, ease) both;
+}
+.k-tk-draft-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.k-tk-field {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 9px;
+  background: var(--k-bg);
+  border: 1px solid var(--k-line-2);
+  border-radius: 7px;
+  outline: none;
+  font-size: 12px;
+  color: var(--k-text);
+  user-select: text;
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+.k-tk-field::placeholder {
+  color: var(--k-faint-2);
+}
+.k-tk-field:hover {
+  border-color: #46433d;
+}
+.k-tk-field:focus {
+  border-color: var(--k-ember);
+  box-shadow: 0 0 0 3px var(--k-ember-soft);
+}
+.k-tk-field-hex {
+  font-family: var(--k-mono);
+  font-size: 11.5px;
+}
+.k-tk-field.is-bad,
+.k-tk-field.is-bad:focus {
+  border-color: var(--k-bad);
+  box-shadow: none;
+}
+.k-tk-draft .k-btn-sm {
+  height: 28px;
+  padding: 0 10px;
+}
+.k-tk-cancel {
+  color: var(--k-faint) !important;
+  border-radius: 7px;
+}
+.k-tk-cancel:hover {
+  color: var(--k-text) !important;
+  background: var(--k-raise) !important;
+}
+
+/* empty state */
+.k-tk-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 28px 16px 20px;
+}
+.k-tk-empty-swatches {
+  display: flex;
+  margin-bottom: 14px;
+}
+.k-tk-empty-swatches i {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  box-shadow: 0 0 0 2px var(--k-panel), inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+}
+.k-tk-empty-swatches i:nth-child(1) {
+  background: #ede7dc;
+  rotate: -8deg;
+}
+.k-tk-empty-swatches i:nth-child(2) {
+  background: var(--k-ember);
+  margin-left: -8px;
+  translate: 0 -3px;
+}
+.k-tk-empty-swatches i:nth-child(3) {
+  background: #c9a27e;
+  margin-left: -8px;
+  rotate: 8deg;
+}
+.k-tk-empty-title {
+  margin: 0 0 4px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--k-text);
+}
+.k-tk-empty-sub {
+  margin: 0 0 14px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--k-faint);
+}
+
+.k-tk-note {
+  margin: 14px 6px 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--k-faint-2);
+}
+
+@keyframes k-tk-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .k-tk-draft {
+    animation: none;
+  }
+  .k-tk-add-btn svg {
+    transition: none;
+  }
+}

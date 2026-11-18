@@ -1,0 +1,59 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Kiln",
+  "version": "0.1.0",
+  "identifier": "design.kiln.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Kiln",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1280,
+        "minHeight": 800,
+        "center": true,
+        "resizable": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 16,
+          "y": 25
+        },
+        "backgroundColor": "#141413",
+        "dragDropEnabled": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "DeveloperTool",
+    "shortDescription": "HTML/CSS-native design tool",
+    "longDescription": "Kiln is a design tool whose canvas is real HTML and CSS. What you shape exports as the same code (HTML, React, Tailwind, Vue), and your own coding agent can work on the file with you over a local MCP server.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": "Developer ID Application: ARUNMOZHI JOSEPH DASS (24DXLQLMPR)",
+      "hardenedRuntime": true
+    },
+    "copyright": "Copyright \u00a9 2026 Arun Dass. MIT License.",
+    "publisher": "Arun Dass"
+  }
+}

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-agent-cli-models"
+description = "Enables the agent_cli_models command without any pre-configured scope."
+commands.allow = ["agent_cli_models"]
+
+[[permission]]
+identifier = "deny-agent-cli-models"
+description = "Denies the agent_cli_models command without any pre-configured scope."
+commands.deny = ["agent_cli_models"]

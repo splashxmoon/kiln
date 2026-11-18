@@ -1,0 +1,28 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Kiln",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1200,
+        "minHeight": 640,
+        "center": true,
+        "resizable": true,
+        "decorations": true,
+        "backgroundColor": "#141413",
+        "dragDropEnabled": false
+      }
+    ]
+  },
+  "bundle": {
+    "targets": ["deb", "rpm", "appimage"],
+    "linux": {
+      "deb": { "section": "graphics" },
+      "rpm": { "release": "1" },
+      "appimage": { "bundleMediaFramework": false }
+    }
+  }
+}
