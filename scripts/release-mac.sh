@@ -21,7 +21,7 @@ DMG="$(ls "$BUNDLE"/dmg/Kiln_*.dmg | head -1)"
 
 codesign --verify --deep --strict "$APP"
 codesign -dv "$APP" 2>&1 | grep -E "Authority=Developer ID|flags=.*runtime" || { echo "App is not Developer ID signed with hardened runtime"; exit 1; }
-codesign --sign "Developer ID Application: ARUNMOZHI JOSEPH DASS (24DXLQLMPR)" --timestamp "$DMG"
+codesign --verify "$DMG" 2>/dev/null || codesign --sign "Developer ID Application: ARUNMOZHI JOSEPH DASS (24DXLQLMPR)" --timestamp "$DMG"   # Tauri usually signs it already
 
 xcrun notarytool submit "$DMG" --keychain-profile "$PROFILE" --wait
 xcrun stapler staple "$DMG"
