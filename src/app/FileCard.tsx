@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { memo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { MoreHorizontal, Trash2, Check } from 'lucide-react'
 import { storage, type FileMeta, type ProjectMeta } from '../platform/storage'
@@ -7,8 +7,11 @@ import { askConfirm, askText } from '../ui/Dialogs'
 import { ago, dropTarget, errorText, toast } from './home-data'
 import { startCardDrag, justDragged } from './drag'
 
-/** A file card. Drag it onto a sidebar project or Drafts, or pick a destination under "Move to…". */
-export function FileCard({
+/**
+ * A file card. Drag it onto a sidebar project or Drafts, or pick a destination under "Move to…".
+ * Memoised: typing in search or a refresh that leaves a file unchanged doesn't draw its card again.
+ */
+export const FileCard = memo(function FileCard({
   f,
   projects,
   showProject,
@@ -66,7 +69,7 @@ export function FileCard({
         setMenu(true)
       }}
     >
-      <div className="k-file-thumb">{f.thumbnail ? <img src={f.thumbnail} alt="" draggable={false} /> : <span className="k-file-thumb-empty" />}</div>
+      <div className="k-file-thumb">{f.thumbnail ? <img src={f.thumbnail} alt="" draggable={false} loading="lazy" decoding="async" /> : <span className="k-file-thumb-empty" />}</div>
       <div className="k-file-meta">
         <div>
           <div className="k-file-title">{f.name}</div>
@@ -165,7 +168,7 @@ export function FileCard({
       </div>
     </div>
   )
-}
+})
 
 function MoveItem({ label, color, current, onPick, close }: { label: string; color: string | undefined; current: boolean; onPick: () => void; close: () => void }) {
   return (

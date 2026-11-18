@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { create } from 'zustand'
 import {
@@ -24,7 +24,7 @@ import {
   Layers as LayersIcon,
   Search,
 } from 'lucide-react'
-import { useEditor, getEditor, ancestors, sortByOrder } from '../store'
+import { useEditor, getEditor, ancestors, descendants, sortByOrder } from '../store'
 import type { KNode, Token } from '../types'
 import { PRESETS, insertPreset } from '../presets'
 import { createToken } from '../factory'
@@ -227,188 +227,352 @@ function LayerDragGhost() {
   )
 }
 
-function LayerRow({ id, depth, expanded, toggle }: { id: string; depth: number; expanded: Set<string>; toggle: (id: string) => void }) {
-  const node = useEditor((s) => s.doc.nodes[id])
-  const selected = useEditor((s) => s.selection.includes(id))
-  const hovered = useEditor((s) => s.hoverId === id)
-  const parentSelected = useEditor((s) => {
-    const n = s.doc.nodes[id]
-    return !!n && ancestors(s.doc, id).some((a) => s.selection.includes(a))
-  })
-  const [renaming, setRenaming] = useState(false)
-  const drop = useLayerDrag((s) => (s.drag && s.drag.overId === id ? (s.drag.pos as DropPos) : null))
-  useEffect(() => {
-    const f = (e: Event) => {
-      const ce = e as CustomEvent<{ id: string; handled?: boolean }>
-      if (ce.detail.id !== id) return
-      ce.detail.handled = true
-      setRenaming(true)
+/** Every layer row is this tall (`.k-layer` in editor.css); the list draws only the rows in view. */
+const ROW_H = 28
+/** Rows drawn above and below the visible ones, so fast scrolling doesn't show gaps. */
+const OVERSCAN = 10
+/** `.k-layer-list` top padding */
+const LIST_PAD = 2
+
+interface Row {
+  id: string
+  depth: number
+}
+
+/** The tree as the panel lists it (front-most first), through open frames only. */
+function flattenRows(nodes: Record<string, KNode>, roots: readonly string[], expanded: Set<string>): Row[] {
+  const out: Row[] = []
+  const walk = (ids: readonly string[], depth: number) => {
+    for (let i = ids.length - 1; i >= 0; i--) {
+      const n = nodes[ids[i]]
+      if (!n) continue
+      out.push({ id: n.id, depth })
+      if (n.children.length && expanded.has(n.id)) walk(n.children, depth + 1)
     }
-    window.addEventListener('kiln:rename-layer', f)
-    return () => window.removeEventListener('kiln:rename-layer', f)
-  }, [id])
+  }
+  walk(roots, 0)
+  return out
+}
+
+/** Whether a frame that contains `id` is selected. */
+function underSelection(nodes: Record<string, KNode>, id: string, selected: Set<string>) {
+  for (let p = nodes[id]?.parentId; p; p = nodes[p]?.parentId) if (selected.has(p)) return true
+  return false
+}
+
+/** The slice of `count` rows that is in view in the scrolling list `el`. */
+function useRowWindow(el: HTMLDivElement | null, count: number) {
+  const [view, setView] = useState({ top: 0, height: 900 })
+  useLayoutEffect(() => {
+    if (!el) return
+    const update = () => setView((v) => (v.top === el.scrollTop && v.height === el.clientHeight ? v : { top: el.scrollTop, height: el.clientHeight }))
+    update()
+    el.addEventListener('scroll', update, { passive: true })
+    const ro = new ResizeObserver(update)
+    ro.observe(el)
+    return () => {
+      el.removeEventListener('scroll', update)
+      ro.disconnect()
+    }
+  }, [el])
+  // capped: after the list shrinks (a filter, a collapse) the old scroll position can be past the end
+  const start = Math.min(count, Math.max(0, Math.floor((view.top - LIST_PAD) / ROW_H) - OVERSCAN))
+  const end = Math.min(count, Math.ceil((view.top - LIST_PAD + view.height) / ROW_H) + OVERSCAN)
+  return { start, end }
+}
+
+/** Scrolls the list just enough to show row `index`. */
+function scrollRowIntoView(el: HTMLElement, index: number) {
+  const top = LIST_PAD + index * ROW_H
+  if (top < el.scrollTop) el.scrollTop = top
+  else if (top + ROW_H > el.scrollTop + el.clientHeight) el.scrollTop = top + ROW_H - el.clientHeight
+}
+
+interface LayerRowProps {
+  id: string
+  depth: number
+  open: boolean
+  selected: boolean
+  parentSelected: boolean
+  renaming: boolean
+  /** `deep`: also every frame inside it (Alt-click on the arrow) */
+  toggle: (id: string, deep?: boolean) => void
+  setRenaming: (id: string | null) => void
+}
+
+/** One row. Memoised: a row draws again only when its own layer, hover or drop state changes. */
+const LayerRow = memo(function LayerRow({ id, depth, open, selected, parentSelected, renaming, toggle, setRenaming }: LayerRowProps) {
+  const node = useEditor((s) => s.doc.nodes[id])
+  const hovered = useEditor((s) => s.hoverId === id)
+  const drop = useLayerDrag((s) => (s.drag && s.drag.overId === id ? (s.drag.pos as DropPos) : null))
   if (!node) return null
-  const isOpen = expanded.has(id)
   const hasKids = node.children.length > 0
-  const kids = [...node.children].reverse()
 
   return (
-    <>
-      <div
-        className={
-          'k-layer' +
-          (selected ? ' is-selected' : '') +
-          (parentSelected ? ' is-child-of-selected' : '') +
-          (hovered ? ' is-hovered' : '') +
-          (!node.visible ? ' is-hidden' : '') +
-          (drop ? ' drop-' + drop : '')
-        }
-        style={{ paddingLeft: 12 + depth * 12 }}
-        data-layer-id={id}
-        onPointerDown={(e) => !renaming && startLayerDrag(e, id)}
-        onPointerEnter={() => getEditor().set({ hoverId: id })}
-        onPointerLeave={() => getEditor().hoverId === id && getEditor().set({ hoverId: null })}
+    <div
+      className={
+        'k-layer' +
+        (selected ? ' is-selected' : '') +
+        (parentSelected ? ' is-child-of-selected' : '') +
+        (hovered ? ' is-hovered' : '') +
+        (!node.visible ? ' is-hidden' : '') +
+        (drop ? ' drop-' + drop : '')
+      }
+      style={{ paddingLeft: 12 + depth * 12 }}
+      data-layer-id={id}
+      onPointerDown={(e) => !renaming && startLayerDrag(e, id)}
+      onPointerEnter={() => getEditor().set({ hoverId: id })}
+      onPointerLeave={() => getEditor().hoverId === id && getEditor().set({ hoverId: null })}
+      onClick={(e) => {
+        if (Date.now() < suppressClickUntil) return
+        const s = getEditor()
+        if (e.shiftKey || isMod(e)) s.select([id], true)
+        else s.select([id])
+      }}
+      onDoubleClick={() => setRenaming(id)}
+      onContextMenu={(e) => {
+        e.preventDefault()
+        const s = getEditor()
+        if (!s.selection.includes(id)) s.select([id])
+        s.set({ contextMenu: { x: e.clientX, y: e.clientY } })
+      }}
+    >
+      <button
+        className={'k-caret' + (hasKids ? '' : ' is-empty')}
+        title={hasKids ? (open ? 'Collapse (Alt-click: and everything inside)' : 'Expand (Alt-click: and everything inside)') : undefined}
         onClick={(e) => {
-          if (Date.now() < suppressClickUntil) return
-          const s = getEditor()
-          if (e.shiftKey || isMod(e)) s.select([id], true)
-          else s.select([id])
-        }}
-        onDoubleClick={() => setRenaming(true)}
-        onContextMenu={(e) => {
-          e.preventDefault()
-          const s = getEditor()
-          if (!s.selection.includes(id)) s.select([id])
-          s.set({ contextMenu: { x: e.clientX, y: e.clientY } })
+          e.stopPropagation()
+          toggle(id, e.altKey)
         }}
       >
+        {hasKids && <ChevronRight size={12} className={open ? 'k-rot' : ''} />}
+      </button>
+      <span className="k-layer-icon">
+        <TypeIcon node={node} />
+      </span>
+      {renaming ? (
+        <RenameInput id={id} name={node.name} done={() => setRenaming(null)} />
+      ) : (
+        <span className="k-layer-name">{node.name}</span>
+      )}
+      {node.binding && <span className="k-layer-bind" title={'Bound to ' + node.binding}>{'{ }'}</span>}
+      <span className="k-layer-actions">
         <button
-          className={'k-caret' + (hasKids ? '' : ' is-empty')}
+          className={node.locked ? 'is-pinned' : ''}
+          title={node.locked ? 'Unlock' : 'Lock'}
           onClick={(e) => {
             e.stopPropagation()
-            toggle(id)
+            getEditor().setProps([id], (n) => void (n.locked = !n.locked))
           }}
         >
-          {hasKids && <ChevronRight size={12} className={isOpen ? 'k-rot' : ''} />}
+          {node.locked ? <Lock size={12} /> : <Unlock size={12} />}
         </button>
-        <span className="k-layer-icon">
-          <TypeIcon node={node} />
-        </span>
-        {renaming ? (
-          <input
-            className="k-layer-rename"
-            autoFocus
-            defaultValue={node.name}
-            onClick={(e) => e.stopPropagation()}
-            onBlur={(e) => {
-              const v = e.target.value.trim()
-              if (v && v !== node.name) getEditor().setProps([id], (n) => void (n.name = v))
-              setRenaming(false)
-            }}
-            onKeyDown={(e) => {
-              e.stopPropagation()
-              if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
-              if (e.key === 'Escape') setRenaming(false)
-            }}
-          />
-        ) : (
-          <span className="k-layer-name">{node.name}</span>
-        )}
-        {node.binding && <span className="k-layer-bind" title={'Bound to ' + node.binding}>{'{ }'}</span>}
-        <span className="k-layer-actions">
-          <button
-            className={node.locked ? 'is-pinned' : ''}
-            title={node.locked ? 'Unlock' : 'Lock'}
-            onClick={(e) => {
-              e.stopPropagation()
-              getEditor().setProps([id], (n) => void (n.locked = !n.locked))
-            }}
-          >
-            {node.locked ? <Lock size={12} /> : <Unlock size={12} />}
-          </button>
-          <button
-            className={!node.visible ? 'is-pinned' : ''}
-            title={node.visible ? 'Hide' : 'Show'}
-            onClick={(e) => {
-              e.stopPropagation()
-              getEditor().setProps([id], (n) => void (n.visible = !n.visible))
-            }}
-          >
-            {node.visible ? <Eye size={12} /> : <EyeOff size={12} />}
-          </button>
-        </span>
-      </div>
-      {isOpen && kids.map((c) => <LayerRow key={c} id={c} depth={depth + 1} expanded={expanded} toggle={toggle} />)}
-    </>
+        <button
+          className={!node.visible ? 'is-pinned' : ''}
+          title={node.visible ? 'Hide' : 'Show'}
+          onClick={(e) => {
+            e.stopPropagation()
+            getEditor().setProps([id], (n) => void (n.visible = !n.visible))
+          }}
+        >
+          {node.visible ? <Eye size={12} /> : <EyeOff size={12} />}
+        </button>
+      </span>
+    </div>
+  )
+})
+
+/**
+ * The inline rename field. Enter or leaving the field saves, Esc cancels. If its row scrolls out
+ * of the drawn window (the list is virtualised) the field unmounts without a blur: it saves then too.
+ */
+function RenameInput({ id, name, done }: { id: string; name: string; done: () => void }) {
+  const input = useRef<HTMLInputElement>(null)
+  const settled = useRef(false)
+  const finish = useRef<(save: boolean) => void>(() => {})
+  useLayoutEffect(() => {
+    finish.current = (save) => {
+      if (settled.current) return
+      settled.current = true
+      const v = input.current?.value.trim()
+      if (save && v && v !== getEditor().doc.nodes[id]?.name) getEditor().setProps([id], (n) => void (n.name = v))
+      done()
+    }
+  })
+  useEffect(() => () => finish.current(true), [])
+  return (
+    <input
+      ref={input}
+      className="k-layer-rename"
+      autoFocus
+      defaultValue={name}
+      onClick={(e) => e.stopPropagation()}
+      onBlur={() => finish.current(true)}
+      onKeyDown={(e) => {
+        e.stopPropagation()
+        if (e.key === 'Enter') finish.current(true)
+        if (e.key === 'Escape') finish.current(false)
+      }}
+    />
   )
 }
 
-function Layers() {
-  const page = useEditor((s) => s.doc.pages.find((p) => p.id === s.pageId))
-  const selection = useEditor((s) => s.selection)
-  const doc = useEditor((s) => s.doc)
-  const [expanded, setExpanded] = useState<Set<string>>(new Set())
-  const [filter, setFilter] = useState('')
-  const rootDrop = useLayerDrag((s) => s.drag?.pos === 'root')
+const NO_CHILDREN: readonly string[] = []
 
-  // reveal selected layers
-  useEffect(() => {
-    if (!selection.length) return
+function Layers() {
+  const roots = useEditor((s) => s.doc.pages.find((p) => p.id === s.pageId)?.children)
+  const pageId = useEditor((s) => s.pageId)
+  const nodes = useEditor((s) => s.doc.nodes)
+  const selection = useEditor((s) => s.selection)
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
+  const [filter, setFilter] = useState('')
+  const [renamingId, setRenamingId] = useState<string | null>(null)
+  const rootDrop = useLayerDrag((s) => s.drag?.pos === 'root')
+  const [listEl, setListEl] = useState<HTMLDivElement | null>(null)
+  /** what to bring into view once its frames are open: the selection, or a layer being renamed */
+  const reveal = useRef<'selection' | string | null>(null)
+
+  const selected = useMemo(() => new Set(selection), [selection])
+  const rows = useMemo(() => flattenRows(nodes, roots ?? NO_CHILDREN, expanded), [nodes, roots, expanded])
+  const results = useMemo(() => {
+    const q = filter.trim().toLowerCase()
+    if (!q) return null
+    return Object.values(nodes).filter((n) => n.pageId === pageId && (n.name.toLowerCase().includes(q) || n.text?.content.toLowerCase().includes(q)))
+  }, [filter, nodes, pageId])
+  const count = results ? results.length : rows.length
+  const { start, end } = useRowWindow(listEl, count)
+
+  const expandTo = useCallback((ids: string[]) => {
     setExpanded((prev) => {
-      const next = new Set(prev)
-      let changed = false
-      for (const id of selection)
-        for (const a of ancestors(getEditor().doc, id))
-          if (!next.has(a)) {
+      let next: Set<string> | null = null
+      const doc = getEditor().doc
+      for (const id of ids)
+        for (const a of ancestors(doc, id))
+          if (!prev.has(a)) {
+            next ??= new Set(prev)
             next.add(a)
-            changed = true
           }
-      return changed ? next : prev
+      return next ?? prev
     })
-    requestAnimationFrame(() => document.querySelector('.k-layer.is-selected')?.scrollIntoView({ block: 'nearest' }))
+  }, [])
+
+  /** Whether every frame holding these layers is open in the panel (deleted layers count as shown). */
+  const allOpen = (ids: string[], open: Set<string>) => ids.every((id) => ancestors(getEditor().doc, id).every((a) => open.has(a)))
+
+  /** Scrolls to the first row `want` names, if that row is listed. */
+  const scrollTo = useCallback(
+    (want: 'selection' | string, list: Row[], sel: Set<string>) => {
+      if (!listEl) return
+      const i = want === 'selection' ? list.findIndex((r) => sel.has(r.id)) : list.findIndex((r) => r.id === want)
+      if (i >= 0) scrollRowIntoView(listEl, i)
+    },
+    [listEl],
+  )
+
+  // reveal a new selection: scroll to it now if its frames are open, else open them and
+  // scroll once they are (the effect below). Layout effects, so no frame shows the old place.
+  useLayoutEffect(() => {
+    if (!selection.length || results) return
+    if (allOpen(selection, expanded)) return scrollTo('selection', rows, selected)
+    reveal.current = 'selection'
+    expandTo(selection)
+    // only a new selection reveals; edits and scrolling later never jump the list
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selection])
 
-  const toggle = (id: string) =>
-    setExpanded((prev) => {
-      const n = new Set(prev)
-      if (n.has(id)) n.delete(id)
-      else n.add(id)
-      return n
-    })
+  useLayoutEffect(() => {
+    const want = reveal.current
+    if (!want || results) return
+    // wait for the frames being opened; a deleted layer counts as open and just clears this
+    if (!allOpen(want === 'selection' ? selection : [want], expanded)) return
+    reveal.current = null
+    scrollTo(want, rows, selected)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows])
 
-  const results = useMemo(() => {
-    if (!filter.trim()) return null
-    const q = filter.toLowerCase()
-    return Object.values(doc.nodes).filter((n) => n.pageId === page?.id && (n.name.toLowerCase().includes(q) || n.text?.content.toLowerCase().includes(q)))
-  }, [filter, doc, page])
+  /** this render's rows and open frames, for the rename event (it arrives outside a render) */
+  const latest = useRef({ rows, expanded })
+  useLayoutEffect(() => {
+    latest.current = { rows, expanded }
+  })
 
-  if (!page) return null
+  // ⌘R and the context menu's "Rename" ask for an inline rename (commands.ts falls back to a dialog)
+  useEffect(() => {
+    const f = (e: Event) => {
+      const { detail } = e as CustomEvent<{ id: string; handled?: boolean }>
+      if (results || !getEditor().doc.nodes[detail.id]) return
+      detail.handled = true
+      setRenamingId(detail.id)
+      const { rows, expanded } = latest.current
+      if (allOpen([detail.id], expanded)) return scrollTo(detail.id, rows, new Set())
+      reveal.current = detail.id
+      expandTo([detail.id])
+    }
+    window.addEventListener('kiln:rename-layer', f)
+    return () => window.removeEventListener('kiln:rename-layer', f)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [results, expandTo, scrollTo])
+
+  const toggle = useCallback(
+    (id: string, deep = false) =>
+      setExpanded((prev) => {
+        const n = new Set(prev)
+        const open = !n.has(id)
+        const ids = deep ? [id, ...descendants(getEditor().doc, id)] : [id]
+        for (const x of ids) {
+          if (open && getEditor().doc.nodes[x]?.children.length) n.add(x)
+          else if (!open) n.delete(x)
+        }
+        return n
+      }),
+    [],
+  )
+
+  if (!roots) return null
+  const slice = (results ?? rows).slice(start, end)
   return (
     <div className="k-layers">
       <div className="k-panel-head">
         <span className="k-panel-title">Layers</span>
         <label className={'k-filter-wrap' + (filter ? ' has-value' : '')}>
           <Search className="k-filter-icon" size={12} strokeWidth={2.25} aria-hidden="true" />
-          <input className="k-filter" placeholder="Find…" aria-label="Find layers" value={filter} onChange={(e) => setFilter(e.target.value)} onKeyDown={(e) => e.stopPropagation()} />
+          <input className="k-filter" placeholder="Find…" aria-label="Find layers" value={filter} onChange={(e) => {
+              setFilter(e.target.value)
+              if (listEl) listEl.scrollTop = 0
+            }} onKeyDown={(e) => e.stopPropagation()} />
         </label>
       </div>
-      <div className={'k-layer-list' + (rootDrop ? ' is-drop-root' : '')}>
+      <div ref={setListEl} className={'k-layer-list' + (rootDrop ? ' is-drop-root' : '')}>
+        {start > 0 && <div style={{ height: start * ROW_H }} aria-hidden="true" />}
         {results
-          ? results.map((n) => (
-              <div key={n.id} className={'k-layer' + (selection.includes(n.id) ? ' is-selected' : '')} style={{ paddingLeft: 10 }} onClick={() => getEditor().select([n.id])}>
+          ? (slice as KNode[]).map((n) => (
+              <div key={n.id} className={'k-layer' + (selected.has(n.id) ? ' is-selected' : '')} style={{ paddingLeft: 10 }} onClick={() => getEditor().select([n.id])}>
                 <span className="k-layer-icon">
                   <TypeIcon node={n} />
                 </span>
                 <span className="k-layer-name">{n.name}</span>
               </div>
             ))
-          : [...page.children].reverse().map((id) => <LayerRow key={id} id={id} depth={0} expanded={expanded} toggle={toggle} />)}
+          : (slice as Row[]).map((r) => (
+              <LayerRow
+                key={r.id}
+                id={r.id}
+                depth={r.depth}
+                open={expanded.has(r.id)}
+                selected={selected.has(r.id)}
+                parentSelected={underSelection(nodes, r.id, selected)}
+                renaming={renamingId === r.id}
+                toggle={toggle}
+                setRenaming={setRenamingId}
+              />
+            ))}
+        {end < count && <div style={{ height: (count - end) * ROW_H }} aria-hidden="true" />}
         {results && !results.length && (
           <div className="k-empty-hint">
             <p>No layers match “{filter}”.</p>
           </div>
         )}
-        {!page.children.length && (
+        {!roots.length && (
           <div className="k-empty-hint">
             <p>This page is empty.</p>
             <p>
@@ -456,15 +620,16 @@ function Assets() {
 function Tokens() {
   const tokens = useEditor((s) => s.doc.tokens)
   const [adding, setAdding] = useState(false)
-  const usage = useEditor((s) => {
-    const counts: Record<string, number> = {}
-    for (const n of Object.values(s.doc.nodes)) {
-      for (const f of n.fills) if (f.tokenId) counts[f.tokenId] = (counts[f.tokenId] ?? 0) + 1
-      if (n.text?.tokenId) counts[n.text.tokenId] = (counts[n.text.tokenId] ?? 0) + 1
+  // counted when the layers change, not on every store update (pan, hover, drag)
+  const nodes = useEditor((s) => s.doc.nodes)
+  const counts = useMemo(() => {
+    const c: Record<string, number> = {}
+    for (const n of Object.values(nodes)) {
+      for (const f of n.fills) if (f.tokenId) c[f.tokenId] = (c[f.tokenId] ?? 0) + 1
+      if (n.text?.tokenId) c[n.text.tokenId] = (c[n.text.tokenId] ?? 0) + 1
     }
-    return JSON.stringify(counts)
-  })
-  const counts = JSON.parse(usage) as Record<string, number>
+    return c
+  }, [nodes])
 
   return (
     <div className="k-tokens k-tk">

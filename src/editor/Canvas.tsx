@@ -5,12 +5,13 @@ import { registerWorld, setGeometryCamera, measure, measureLocal, rectsIntersect
 import { createNode } from './factory'
 import { NodeView } from './NodeView'
 import { Overlay } from './Overlay'
-import type { KDoc, KNode, NodeType, Rect } from './types'
+import type { Camera, KDoc, KNode, NodeType, Rect } from './types'
 import { defaultShaderSpec } from '../shaders/defs'
 import { insertImageFiles } from './images'
 import { constrain45 } from './vector'
 import { isMac } from '../platform/os'
 import { isMod } from '../platform/keys'
+import './perf.css'
 
 /* ------------------------------------------------------------- viewport */
 
@@ -49,10 +50,15 @@ export function zoomBy(factor: number, center?: { x: number; y: number }) {
       return
     }
   }
-  const c = center ?? { x: vp.width / 2, y: vp.height / 2 }
+  s.setCamera(zoomedAround(cam, factor, center ?? { x: vp.width / 2, y: vp.height / 2 }))
+}
+
+/** The camera zoomed by `factor`, keeping the viewport point `c` fixed. */
+function zoomedAround(cam: Camera, factor: number, c: { x: number; y: number }): Camera {
+  const z = Math.min(64, Math.max(0.02, cam.zoom * factor))
   const wx = (c.x - cam.x) / cam.zoom
   const wy = (c.y - cam.y) / cam.zoom
-  s.setCamera({ zoom: z, x: c.x - wx * z, y: c.y - wy * z })
+  return { zoom: z, x: c.x - wx * z, y: c.y - wy * z }
 }
 
 /** World point at the centre of the viewport. */
@@ -231,7 +237,17 @@ type Gesture =
       /** right-button pan: a press without movement opens the context menu instead */
       right?: { moved: boolean; mod: boolean }
     }
-  | { kind: 'marquee'; start: { x: number; y: number }; scope: string[]; base: string[]; additive: boolean }
+  | {
+      kind: 'marquee'
+      start: { x: number; y: number }
+      scope: string[]
+      base: string[]
+      additive: boolean
+      /** the selectable layers in scope, measured once on the first move (a marquee changes no layout);
+       *  measured again only if the document changes mid-gesture (an agent edit, undo) */
+      rects: { id: string; r: Rect }[] | null
+      rectsDoc: KDoc | null
+    }
   | {
       kind: 'move'
       startClient: { x: number; y: number }
@@ -303,9 +319,30 @@ export function Canvas() {
   // wheel: pan / pinch-zoom (non-passive so we can stop browser zoom)
   useEffect(() => {
     const el = vpRef.current!
+    // a trackpad sends several wheel events per frame: fold them into one camera update per frame.
+    // `from` is the camera the batch started on; if anything else moves the camera meanwhile
+    // (a shortcut, zoom to fit), the batch starts over from the new camera.
+    let pending: Camera | null = null
+    let from: Camera | null = null
+    let raf = 0
+    const flush = () => {
+      raf = 0
+      const s = getEditor()
+      if (pending && s.camera === from) s.setCamera(pending)
+      pending = from = null
+    }
     const onWheel = (e: WheelEvent) => {
       e.preventDefault()
       const s = getEditor()
+      if (s.camera !== from) {
+        pending = null
+        from = s.camera
+      }
+      const cam = pending ?? s.camera
+      const queue = (next: Camera) => {
+        pending = next
+        if (!raf) raf = requestAnimationFrame(flush)
+      }
       const v = s.view
       const rect = el.getBoundingClientRect()
       const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? rect.height : 1
@@ -323,15 +360,18 @@ export function Canvas() {
         // (Firefox reports a notch in lines, about 48px after scaling, so line or page mode counts as a notch too)
         const notch = pinch && !isMac && (e.deltaMode !== 0 || Math.abs(deltaY) >= 50)
         const factor = Math.exp(-d * dir * (pinch && !notch ? 0.012 : 0.0025))
-        zoomBy(factor, { x: e.clientX - rect.left, y: e.clientY - rect.top })
+        queue(zoomedAround(cam, factor, { x: e.clientX - rect.left, y: e.clientY - rect.top }))
       } else {
         const dx = e.shiftKey && !deltaX ? deltaY : deltaX
         const dy = e.shiftKey && !deltaX ? 0 : deltaY
-        s.setCamera({ x: s.camera.x - dx, y: s.camera.y - dy })
+        queue({ ...cam, x: cam.x - dx, y: cam.y - dy })
       }
     }
     el.addEventListener('wheel', onWheel, { passive: false })
-    return () => el.removeEventListener('wheel', onWheel)
+    return () => {
+      el.removeEventListener('wheel', onWheel)
+      cancelAnimationFrame(raf)
+    }
   }, [])
 
   const toWorld = (e: { clientX: number; clientY: number }) => {
@@ -418,7 +458,7 @@ export function Canvas() {
 
     if (!targetId) {
       const scope = hit && isArtboard(s.doc, pathTo(s.doc, hit)[0]) ? s.doc.nodes[pathTo(s.doc, hit)[0]].children : page?.children ?? []
-      gesture.current = { kind: 'marquee', start: world, scope, base: e.shiftKey ? s.selection : [], additive: e.shiftKey }
+      gesture.current = { kind: 'marquee', start: world, scope, base: e.shiftKey ? s.selection : [], additive: e.shiftKey, rects: null, rectsDoc: null }
       if (!e.shiftKey) s.select([])
       return
     }
@@ -605,12 +645,17 @@ export function Canvas() {
           w: Math.abs(world.x - g.start.x),
           h: Math.abs(world.y - g.start.y),
         }
-        const hits = g.scope.filter((id) => {
-          const n = s.doc.nodes[id]
-          if (!n || !n.visible || n.locked) return false
-          const nr = measure(id)
-          return nr && rectsIntersect(r, nr)
-        })
+        if (!g.rects || g.rectsDoc !== s.doc) {
+          g.rects = []
+          g.rectsDoc = s.doc
+          for (const id of g.scope) {
+            const n = s.doc.nodes[id]
+            if (!n || !n.visible || n.locked) continue
+            const nr = measure(id)
+            if (nr) g.rects.push({ id, r: nr })
+          }
+        }
+        const hits = g.rects.filter((c) => s.doc.nodes[c.id] && rectsIntersect(r, c.r)).map((c) => c.id)
         const sel = g.additive ? [...new Set([...g.base, ...hits])] : hits
         s.set({ marquee: r, selection: sel })
         return

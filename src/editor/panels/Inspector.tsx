@@ -1,6 +1,8 @@
-import { useRef, useState } from 'react'
+import { Fragment, useMemo, useRef, useState } from 'react'
 import type { Draft } from 'immer'
 import {
+  AlignHorizontalDistributeCenter,
+  AlignVerticalDistributeCenter,
   AlignHorizontalJustifyCenter,
   AlignHorizontalJustifyEnd,
   AlignHorizontalJustifyStart,
@@ -48,6 +50,7 @@ import { FONT_FAMILIES, FONT_WEIGHTS, ensureFont } from '../fonts'
 import { SHADER_DEFS, SHADER_KINDS, defaultShaderSpec } from '../../shaders/defs'
 import { readAsDataURL } from '../images'
 import { TypeIcon } from './LayersPanel'
+import { COMMANDS, runCommand } from '../commands'
 
 type Recipe = (n: Draft<KNode>) => void
 
@@ -80,7 +83,7 @@ export function Inspector() {
         )}
         <span className="k-insp-type">{nodes.length > 1 ? 'Mixed' : n.parentId === null && n.type === 'frame' ? 'Artboard' : n.type}</span>
       </div>
-      <AlignBar ids={ids} />
+      <AlignBar />
       <PositionSection nodes={nodes} set={set} />
       {(only('frame') || only('shader')) && <LayoutSection n={n} set={set} />}
       {only('text') && <TextSection n={n} set={set} />}
@@ -170,10 +173,17 @@ function documentColors(): string[] {
 function PageInspector() {
   const page = useEditor((s) => s.doc.pages.find((p) => p.id === s.pageId))
   const tokens = useEditor((s) => s.doc.tokens)
-  const doc = useEditor((s) => s.doc)
+  // counted when the layers change, not on every render of the page panel
+  const nodes = useEditor((s) => s.doc.nodes)
+  const pageId = page?.id
+  const count = useMemo(() => {
+    let c = 0
+    for (const id in nodes) if (nodes[id].pageId === pageId) c++
+    return c
+  }, [nodes, pageId])
+  const openComments = useEditor((s) => s.doc.comments.reduce((c, x) => (x.resolved ? c : c + 1), 0))
   const [picking, setPicking] = useState(false)
   if (!page) return null
-  const count = Object.values(doc.nodes).filter((n) => n.pageId === page.id).length
   // the page colour is stored as one hex; the field edits colour and opacity apart
   const bg = parseColor(page.background) ?? { r: 233, g: 230, b: 225, a: 1 }
   const solid = rgbToHex({ ...bg, a: 1 })
@@ -224,7 +234,7 @@ function PageInspector() {
         </div>
         <div className="k-kv">
           <span>Comments</span>
-          <b>{doc.comments.filter((c) => !c.resolved).length} open</b>
+          <b>{openComments} open</b>
         </div>
       </Section>
     </div>
@@ -233,68 +243,42 @@ function PageInspector() {
 
 /* -------------------------------------------------------------- align */
 
-function AlignBar({ ids }: { ids: string[] }) {
-  const align = (mode: 'l' | 'c' | 'r' | 't' | 'm' | 'b') => {
-    const s = getEditor()
-    const doc = s.doc
-    const movable = ids.filter((id) => {
-      const n = doc.nodes[id]
-      const p = n.parentId ? doc.nodes[n.parentId] : null
-      return !(p && p.layout.mode === 'flex' && n.positioning !== 'absolute')
-    })
-    if (!movable.length) return
-    let ref: { x: number; y: number; w: number; h: number } | null = null
-    if (movable.length === 1) {
-      const n = doc.nodes[movable[0]]
-      if (!n.parentId) return
-      ref = measure(n.parentId)
-    } else {
-      const rs = movable.map((id) => measure(id)!).filter(Boolean)
-      const x = Math.min(...rs.map((r) => r.x))
-      const y = Math.min(...rs.map((r) => r.y))
-      ref = { x, y, w: Math.max(...rs.map((r) => r.x + r.w)) - x, h: Math.max(...rs.map((r) => r.y + r.h)) - y }
-    }
-    if (!ref) return
-    const rects = Object.fromEntries(movable.map((id) => [id, measure(id)!]))
-    s.update((d) => {
-      for (const id of movable) {
-        const r = rects[id]
-        const n = d.nodes[id]
-        let dx = 0
-        let dy = 0
-        if (mode === 'l') dx = ref!.x - r.x
-        if (mode === 'c') dx = ref!.x + ref!.w / 2 - (r.x + r.w / 2)
-        if (mode === 'r') dx = ref!.x + ref!.w - (r.x + r.w)
-        if (mode === 't') dy = ref!.y - r.y
-        if (mode === 'm') dy = ref!.y + ref!.h / 2 - (r.y + r.h / 2)
-        if (mode === 'b') dy = ref!.y + ref!.h - (r.y + r.h)
-        n.x = Math.round(n.x + dx)
-        n.y = Math.round(n.y + dy)
-      }
-    })
-  }
+/**
+ * Align and distribute: the same commands as the menus and ⌥ shortcuts (commands.ts), so the
+ * bar, the palette and the keys agree on what moves (locked layers and flex children don't).
+ */
+const ALIGN_BUTTONS: [id: string, Icon: typeof AlignHorizontalJustifyStart][] = [
+  ['arrange.alignLeft', AlignHorizontalJustifyStart],
+  ['arrange.alignCenter', AlignHorizontalJustifyCenter],
+  ['arrange.alignRight', AlignHorizontalJustifyEnd],
+  ['arrange.alignTop', AlignVerticalJustifyStart],
+  ['arrange.alignMiddle', AlignVerticalJustifyCenter],
+  ['arrange.alignBottom', AlignVerticalJustifyEnd],
+  ['arrange.distributeH', AlignHorizontalDistributeCenter],
+  ['arrange.distributeV', AlignVerticalDistributeCenter],
+]
+
+const alignCommands = ALIGN_BUTTONS.map(([id]) => COMMANDS.find((x) => x.id === id))
+
+function AlignBar() {
+  // which buttons apply, worked out on store changes but drawn again only when one flips
+  // (it depends on the parent too: undoing a flex parent re-enables align)
+  const enabled = useEditor(useShallow(() => alignCommands.map((c) => !!c && (!c.enabled || c.enabled()))))
   const I = 15
   return (
     <div className="k-alignbar">
-      <button title="Align left" onClick={() => align('l')}>
-        <AlignHorizontalJustifyStart size={I} />
-      </button>
-      <button title="Align horizontal centers" onClick={() => align('c')}>
-        <AlignHorizontalJustifyCenter size={I} />
-      </button>
-      <button title="Align right" onClick={() => align('r')}>
-        <AlignHorizontalJustifyEnd size={I} />
-      </button>
-      <span className="k-sep" />
-      <button title="Align top" onClick={() => align('t')}>
-        <AlignVerticalJustifyStart size={I} />
-      </button>
-      <button title="Align vertical centers" onClick={() => align('m')}>
-        <AlignVerticalJustifyCenter size={I} />
-      </button>
-      <button title="Align bottom" onClick={() => align('b')}>
-        <AlignVerticalJustifyEnd size={I} />
-      </button>
+      {ALIGN_BUTTONS.map(([id, Icon], i) => {
+        const c = COMMANDS.find((x) => x.id === id)
+        if (!c) return null
+        return (
+          <Fragment key={id}>
+            {(i === 3 || i === 6) && <span className="k-sep" />}
+            <button title={c.keys ? `${c.label} (${c.keys})` : c.label} disabled={!enabled[i]} onClick={() => runCommand(id)}>
+              <Icon size={I} />
+            </button>
+          </Fragment>
+        )
+      })}
     </div>
   )
 }
@@ -303,8 +287,8 @@ function AlignBar({ ids }: { ids: string[] }) {
 
 function PositionSection({ nodes, set }: { nodes: KNode[]; set: (r: Recipe, key?: string) => void }) {
   const n = nodes[0]
-  const doc = useEditor((s) => s.doc)
-  const parent = n.parentId ? doc.nodes[n.parentId] : null
+  // only the parent: whether it lays this layer out (flex) decides which fields apply
+  const parent = useEditor((s) => (n.parentId ? s.doc.nodes[n.parentId] : null)) ?? null
   const inFlow = !!parent && parent.layout.mode === 'flex' && n.positioning !== 'absolute'
   const size = measureSize(n.id)
   const W = n.widthMode === 'fixed' ? n.width : size?.w ?? n.width

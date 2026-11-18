@@ -8,8 +8,16 @@ import type { Camera, Rect } from './types'
 let worldEl: HTMLElement | null = null
 let cameraRef: Camera = { x: 0, y: 0, zoom: 1 }
 
+/**
+ * id → element, so hover, snapping and the overlay don't scan the whole canvas with
+ * querySelector on every call. An entry is trusted only while the element is still in the
+ * world and still carries that id (React may replace it, e.g. when a text layer starts editing).
+ */
+const elCache = new Map<string, Element>()
+
 export function registerWorld(el: HTMLElement | null) {
   worldEl = el
+  elCache.clear()
 }
 export function setGeometryCamera(c: Camera) {
   cameraRef = c
@@ -20,7 +28,14 @@ export function getWorldEl() {
 
 export function nodeEl(id: string): HTMLElement | null {
   if (!worldEl) return null
-  return worldEl.querySelector(`[data-id="${CSS.escape(id)}"]`)
+  const hit = elCache.get(id)
+  if (hit && hit.isConnected && hit.getAttribute('data-id') === id && worldEl.contains(hit)) return hit as HTMLElement
+  const el = worldEl.querySelector<HTMLElement>(`[data-id="${CSS.escape(id)}"]`)
+  if (el) elCache.set(id, el)
+  else elCache.delete(id)
+  // deleted layers would otherwise pile up over a long session
+  if (elCache.size > 20000) elCache.clear()
+  return el
 }
 
 /** World-space bounding box of a node (axis aligned, includes rotation). */

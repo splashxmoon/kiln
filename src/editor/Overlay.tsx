@@ -1,9 +1,9 @@
-import { useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Sparkles, type LucideIcon } from 'lucide-react'
 import { useEditor, getEditor } from './store'
-import { measure, measureSize, unionRects } from './geometry'
+import { measure as measureLive, measureSize, unionRects } from './geometry'
 import { overlayStartMove, overlayStartResize } from './Canvas'
-import type { Camera, Rect } from './types'
+import type { Camera, KDoc, Rect } from './types'
 import type { PenDraft } from './store'
 import { pointsToD } from './vector'
 import { CommentThread } from './Comments'
@@ -29,6 +29,25 @@ interface Measured {
   /** the canvas box in CSS pixels, so the cursor and its pill stay inside it */
   box: { w: number; h: number }
   comments: Record<string, Rect>
+  /** unrotated layout size of the single selected layer, for the size badge */
+  size: { w: number; h: number } | null
+  /** Alt held: the box the selection is measured to (the hovered layer, else the selection's parent) */
+  measureTo: Rect | null
+}
+
+/**
+ * Rects measured since the document, the measure tick or the dragged set last changed.
+ * Layout only changes with those, so a hover or selection change measures just what is new
+ * instead of every artboard. While layers are dragged only their CSS transform moves, so their
+ * rects (and their descendants') are stored without the drag offset and shifted by dx/dy.
+ */
+interface RectCache {
+  doc: KDoc
+  tick: number
+  dragIds: string[] | null
+  pageId: string
+  rects: Map<string, Rect>
+  sizes: Map<string, { w: number; h: number } | null>
 }
 
 const AFTERGLOW_MS = 1200
@@ -55,14 +74,57 @@ export function Overlay({ createRect }: { createRect: Rect | null }) {
   const layoutGuides = useEditor((s) => s.view.layoutGuides)
   const presence = useEditor((s) => s.view.presence)
   const showComments = useEditor((s) => s.view.showComments)
-  const [m, setM] = useState<Measured>({ sel: {}, hover: null, target: null, artboards: [], gaps: [], padding: [], focus: {}, glow: [], cursor: null, provider: '', box: { w: 0, h: 0 }, comments: {} })
+  const altDown = useEditor((s) => s.altDown)
+  const [m, setM] = useState<Measured>({ sel: {}, hover: null, target: null, artboards: [], gaps: [], padding: [], focus: {}, glow: [], cursor: null, provider: '', box: { w: 0, h: 0 }, comments: {}, size: null, measureTo: null })
   const rootRef = useRef<HTMLDivElement>(null)
+  const cacheRef = useRef<RectCache | null>(null)
   // the cursor stays up for a moment after the turn ends, then leaves
   const turnLive = useLingering(!!agentTurn, LEAVE_MS)
 
   const page = doc.pages.find((p) => p.id === pageId)
 
   useLayoutEffect(() => {
+    const dragIds = drag?.ids ?? null
+    const prevCache = cacheRef.current
+    const cache: RectCache =
+      prevCache && prevCache.doc === doc && prevCache.tick === tick && prevCache.dragIds === dragIds && prevCache.pageId === pageId
+        ? prevCache
+        : { doc, tick, dragIds, pageId, rects: new Map(), sizes: new Map() }
+    cacheRef.current = cache
+    const dx = drag?.dx ?? 0
+    const dy = drag?.dy ?? 0
+    /** the layer or one of its ancestors is being dragged */
+    const moved = (id: string) => {
+      if (!dragIds) return false
+      for (let cur: string | null = id; cur; cur = doc.nodes[cur]?.parentId ?? null) if (dragIds.includes(cur)) return true
+      return false
+    }
+    // the drag translate runs along the parent's axes: inside a rotated frame it is not a world
+    // dx/dy, so dragged layers there are measured live instead of shifted
+    const rotatedAncestor = (id: string) => {
+      for (let cur = doc.nodes[id]?.parentId ?? null; cur; cur = doc.nodes[cur]?.parentId ?? null) if (doc.nodes[cur]?.rotation) return true
+      return false
+    }
+    const shiftable = !dragIds || dragIds.every((id) => !rotatedAncestor(id))
+    const measure = (id: string): Rect | null => {
+      const shift = moved(id)
+      if (shift && !shiftable) return measureLive(id)
+      let r: Rect | null = cache.rects.get(id) ?? null
+      if (!r) {
+        const live = measureLive(id)
+        r = live && shift ? { ...live, x: live.x - dx, y: live.y - dy } : live
+        // a miss (not rendered yet, another page) is not kept, so it is measured again next time
+        if (r) cache.rects.set(id, r)
+      }
+      return r && shift ? { ...r, x: r.x + dx, y: r.y + dy } : r
+    }
+    let size: Measured['size'] = null
+    if (selection.length === 1) {
+      const id = selection[0]
+      if (!cache.sizes.has(id)) cache.sizes.set(id, measureSize(id))
+      size = cache.sizes.get(id) ?? null
+    }
+
     const sel: Record<string, Rect> = {}
     for (const id of selection) {
       const r = measure(id)
@@ -115,9 +177,20 @@ export function Overlay({ createRect }: { createRect: Rect | null }) {
     const hit = (agentAction?.ids ?? []).map((id) => measure(id)).filter((r): r is Rect => !!r)
     const target = unionRects(hit)
     const comments: Record<string, Rect> = {}
+    // Alt measuring: to the hovered layer, or (hovering nothing else) to the selection's parent
+    let measureTo: Rect | null = null
+    if (altDown && selection.length && !drag && !marquee && !editingTextId) {
+      let to = hoverId && !selection.includes(hoverId) && doc.nodes[hoverId] ? hoverId : null
+      if (!to) {
+        const parents = new Set(selection.map((id) => doc.nodes[id]?.parentId ?? null))
+        if (parents.size === 1) to = [...parents][0]
+      }
+      if (to) measureTo = measure(to)
+    }
     setM((prev) => ({
       sel,
-      hover: hoverId && !selection.includes(hoverId) ? measure(hoverId) : null,
+      // the hover outline is hidden while dragging
+      hover: hoverId && !drag && !selection.includes(hoverId) ? measure(hoverId) : null,
       target: drag?.targetParent ? measure(drag.targetParent) : null,
       artboards,
       gaps,
@@ -128,8 +201,32 @@ export function Overlay({ createRect }: { createRect: Rect | null }) {
       provider: agentTurn?.provider ?? prev.provider,
       box: { w: rootRef.current?.clientWidth ?? 0, h: rootRef.current?.clientHeight ?? 0 },
       comments,
+      size,
+      measureTo,
     }))
-  }, [doc, selection, hoverId, drag, tick, pageId, page, agentFocus, agentAction, agentTrail, agentTurn])
+  }, [doc, selection, hoverId, drag, tick, pageId, page, agentFocus, agentAction, agentTrail, agentTurn, altDown, marquee, editingTextId])
+
+  // Alt is also read off pointer events: its key up is lost when the window loses focus mid-press
+  // (and Windows can swallow it), so the measuring never sticks on
+  useEffect(() => {
+    const sync = (e: PointerEvent) => {
+      const s = getEditor()
+      if (s.altDown !== e.altKey) s.set({ altDown: e.altKey })
+    }
+    const off = () => {
+      if (getEditor().altDown) getEditor().set({ altDown: false })
+    }
+    window.addEventListener('pointermove', sync, true)
+    window.addEventListener('pointerdown', sync, true)
+    window.addEventListener('blur', off)
+    document.addEventListener('visibilitychange', off)
+    return () => {
+      window.removeEventListener('pointermove', sync, true)
+      window.removeEventListener('pointerdown', sync, true)
+      window.removeEventListener('blur', off)
+      document.removeEventListener('visibilitychange', off)
+    }
+  }, [])
 
   const S = (r: Rect) => ({ left: r.x * cam.zoom + cam.x, top: r.y * cam.zoom + cam.y, width: r.w * cam.zoom, height: r.h * cam.zoom })
   const selRects = Object.values(m.sel)
@@ -145,7 +242,7 @@ export function Overlay({ createRect }: { createRect: Rect | null }) {
     }
     const w = singleNode.widthMode === 'hug' ? 'Hug' : singleNode.widthMode === 'fill' ? 'Fill' : ''
     const h = singleNode.heightMode === 'hug' ? 'Hug' : singleNode.heightMode === 'fill' ? 'Fill' : ''
-    const size = measureSize(singleNode.id)
+    const size = m.size
     const W = size ? size.w : Math.round(single.w)
     const H = size ? size.h : Math.round(single.h)
     return `${Math.round(W)}${w ? ' ' + w : ''} × ${Math.round(H)}${h ? ' ' + h : ''}`
@@ -220,7 +317,7 @@ export function Overlay({ createRect }: { createRect: Rect | null }) {
           <div key={'g' + i} className="k-gap" style={S(r)} />
         ))}
 
-      {m.hover && !drag && <div className="k-hover" style={S(m.hover)} />}
+      {m.hover && !drag && !m.measureTo && <div className="k-hover" style={S(m.hover)} />}
       {m.target && <div className="k-drop-target" style={S(m.target)} />}
       {drag?.indicator && <div className="k-insert" style={S(drag.indicator)} />}
 
@@ -300,6 +397,8 @@ export function Overlay({ createRect }: { createRect: Rect | null }) {
         ),
       )}
 
+      {m.measureTo && (group ?? single) && <Distances from={(group ?? single)!} to={m.measureTo} cam={cam} />}
+
       {marquee && <div className="k-marquee" style={S(marquee)} />}
       <PenPreview cam={cam} />
       {createRect && <div className="k-create" style={S(createRect)} />}
@@ -323,6 +422,128 @@ export function Overlay({ createRect }: { createRect: Rect | null }) {
         )
       })}
     </div>
+  )
+}
+
+/* ------------------------------------------------------------- Alt measuring */
+
+const MEASURE_RED = '#f2433a'
+
+interface Segment {
+  x1: number
+  y1: number
+  x2: number
+  y2: number
+  /** length in px (document units); 0 for the dashed extensions */
+  len: number
+  dashed?: boolean
+}
+
+/**
+ * Distance lines from box `a` (the selection) to box `b`, in document space. Apart on an axis:
+ * the gap between the facing edges (plus a dashed extension when the line misses `b`).
+ * Overlapping or nested: the distances between matching edges, on both axes.
+ */
+function distanceSegments(a: Rect, b: Rect): Segment[] {
+  const out: Segment[] = []
+  const [ax0, ax1, ay0, ay1] = [a.x, a.x + a.w, a.y, a.y + a.h]
+  const [bx0, bx1, by0, by1] = [b.x, b.x + b.w, b.y, b.y + b.h]
+  const rowsShared = Math.max(ay0, by0) < Math.min(ay1, by1)
+  const colsShared = Math.max(ax0, bx0) < Math.min(ax1, bx1)
+  // a horizontal line runs through the rows both share, else through the selection's middle
+  const y = rowsShared ? (Math.max(ay0, by0) + Math.min(ay1, by1)) / 2 : (ay0 + ay1) / 2
+  const x = colsShared ? (Math.max(ax0, bx0) + Math.min(ax1, bx1)) / 2 : (ax0 + ax1) / 2
+  const h = (p: number, q: number) => Math.abs(q - p) > 0.01 && out.push({ x1: Math.min(p, q), y1: y, x2: Math.max(p, q), y2: y, len: Math.abs(q - p) })
+  const v = (p: number, q: number) => Math.abs(q - p) > 0.01 && out.push({ x1: x, y1: Math.min(p, q), x2: x, y2: Math.max(p, q), len: Math.abs(q - p) })
+  const gapX = bx0 >= ax1 ? ([ax1, bx0] as const) : ax0 >= bx1 ? ([bx1, ax0] as const) : null
+  const gapY = by0 >= ay1 ? ([ay1, by0] as const) : ay0 >= by1 ? ([by1, ay0] as const) : null
+  if (gapX || gapY) {
+    if (gapX) {
+      h(gapX[0], gapX[1])
+      if (!rowsShared) {
+        const ex = bx0 >= ax1 ? bx0 : bx1
+        out.push({ x1: ex, y1: y, x2: ex, y2: y < by0 ? by0 : by1, len: 0, dashed: true })
+      }
+    }
+    if (gapY) {
+      v(gapY[0], gapY[1])
+      if (!colsShared) {
+        const ey = by0 >= ay1 ? by0 : by1
+        out.push({ x1: x, y1: ey, x2: x < bx0 ? bx0 : bx1, y2: ey, len: 0, dashed: true })
+      }
+    }
+  } else {
+    h(ax0, bx0)
+    h(ax1, bx1)
+    v(ay0, by0)
+    v(ay1, by1)
+  }
+  return out
+}
+
+const fmtPx = (n: number) => String(Math.round(n * 10) / 10)
+
+/** The red distance lines and their px labels, drawn while Alt is held. */
+function Distances({ from, to, cam }: { from: Rect; to: Rect; cam: Camera }) {
+  const segs = distanceSegments(from, to)
+  // lines sit on pixel centres so they stay one crisp pixel wide
+  const X = (x: number) => Math.round(x * cam.zoom + cam.x) + 0.5
+  const Y = (y: number) => Math.round(y * cam.zoom + cam.y) + 0.5
+  const box = { left: to.x * cam.zoom + cam.x, top: to.y * cam.zoom + cam.y, width: to.w * cam.zoom, height: to.h * cam.zoom }
+  return (
+    <>
+      <div style={{ position: 'absolute', ...box, boxShadow: `inset 0 0 0 1px ${MEASURE_RED}`, pointerEvents: 'none' }} />
+      <svg aria-hidden style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', overflow: 'visible', pointerEvents: 'none' }}>
+        {segs.map((g, i) => {
+          const [x1, y1, x2, y2] = [X(g.x1), Y(g.y1), X(g.x2), Y(g.y2)]
+          const flat = g.y1 === g.y2
+          return (
+            <g key={i} stroke={MEASURE_RED} strokeWidth={1} shapeRendering="crispEdges">
+              <line x1={x1} y1={y1} x2={x2} y2={y2} strokeDasharray={g.dashed ? '3 3' : undefined} />
+              {!g.dashed &&
+                (flat ? (
+                  <>
+                    <line x1={x1} y1={y1 - 3} x2={x1} y2={y1 + 4} />
+                    <line x1={x2} y1={y2 - 3} x2={x2} y2={y2 + 4} />
+                  </>
+                ) : (
+                  <>
+                    <line x1={x1 - 3} y1={y1} x2={x1 + 4} y2={y1} />
+                    <line x1={x2 - 3} y1={y2} x2={x2 + 4} y2={y2} />
+                  </>
+                ))}
+            </g>
+          )
+        })}
+      </svg>
+      {segs.map(
+        (g, i) =>
+          !g.dashed && (
+            <div
+              key={'l' + i}
+              className="k-measure-label"
+              style={{
+                position: 'absolute',
+                left: ((g.x1 + g.x2) / 2) * cam.zoom + cam.x,
+                top: ((g.y1 + g.y2) / 2) * cam.zoom + cam.y,
+                transform: 'translate(-50%, -50%)',
+                padding: '1px 4px',
+                borderRadius: 3,
+                background: MEASURE_RED,
+                color: '#fff',
+                fontSize: 10.5,
+                fontWeight: 600,
+                lineHeight: '14px',
+                fontVariantNumeric: 'tabular-nums',
+                whiteSpace: 'nowrap',
+                pointerEvents: 'none',
+              }}
+            >
+              {fmtPx(g.len)}
+            </div>
+          ),
+      )}
+    </>
   )
 }
 

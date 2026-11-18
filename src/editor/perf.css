@@ -1,0 +1,16 @@
+/*
+ * Off-screen culling. The browser skips rendering artboards that are off screen, so big pages
+ * only lay out and paint what is in view.
+ *
+ * NodeView marks only top-level frames that clip their content and have a fixed width and
+ * height (data-cull). content-visibility adds paint and size containment while skipped:
+ * clipping frames lose nothing to paint containment, and fixed sizes keep their box exact,
+ * so measure(), zoom to fit and the artboard labels read the same rects whether skipped or not.
+ * Layout APIs (getBoundingClientRect, Range rects) still force layout inside a skipped artboard,
+ * so the overlay, snapping and the snapshot box painter keep working. The snapshot's
+ * foreignObject path serialises a clone without this stylesheet, so it is never culled there.
+ */
+.k-world > [data-cull] {
+  content-visibility: auto;
+  contain-intrinsic-size: auto var(--kc-w) auto var(--kc-h);
+}

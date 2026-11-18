@@ -6,6 +6,7 @@
  */
 import { nanoid } from 'nanoid'
 import type { KDoc } from '../editor/types'
+import { migrate, versionToSave } from '../editor/migrate'
 import {
   desktopCreateProject,
   desktopDeleteFile,
@@ -561,4 +562,17 @@ const browserStorage: Storage = {
   purge: async (trashId) => (await pickBrowserBackend()).purge(trashId),
 }
 
-export const storage: Storage = isTauri ? desktopStorage : browserStorage
+const backend: Storage = isTauri ? desktopStorage : browserStorage
+
+/**
+ * Every load runs the file through `migrate()` (old files open in the current format), and every
+ * save stamps the format version, whichever backend is underneath.
+ */
+export const storage: Storage = {
+  ...backend,
+  load: async (id) => {
+    const raw = await backend.load(id)
+    return raw ? migrate(raw) : null
+  },
+  save: (doc, opts) => backend.save(doc.version === versionToSave(doc) ? doc : { ...doc, version: versionToSave(doc) }, opts),
+}

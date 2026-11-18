@@ -66,6 +66,8 @@ export interface ExportFile {
   /** relative path inside the chosen folder, e.g. `index.html` or `assets/site.css` */
   path: string
   contents: string
+  /** `contents` is base64 (PNG / JPG exports): written to disk as the decoded bytes */
+  base64?: boolean
 }
 
 interface AgentCallPayload {

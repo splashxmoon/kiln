@@ -1,0 +1,74 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`codegen > gives the same output for the same document (snapshot) 1`] = `
+[
+  [
+    "index.html",
+    "<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Product card</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400&amp;display=swap" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="product-card">
+      <span class="title">Morning cup</span>
+      <div class="swatch"></div>
+    </div>
+  </body>
+</html>
+",
+  ],
+  [
+    "styles.css",
+    "*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+}
+
+:root {
+  --ember: #FF5B1F;
+}
+
+.product-card {
+  width: 400px;
+  height: 240px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 24px;
+  background-color: #FFFFFF;
+  overflow: hidden;
+}
+
+.title {
+  font-family: "Geist", ui-sans-serif, system-ui, sans-serif;
+  font-size: 20px;
+  font-weight: 400;
+  line-height: 1.4;
+  color: #141413;
+  white-space: nowrap;
+}
+
+.swatch {
+  flex-shrink: 0;
+  width: 80px;
+  height: 40px;
+  background-color: var(--ember);
+}
+",
+  ],
+]
+`;

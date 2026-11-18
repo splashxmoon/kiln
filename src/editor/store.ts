@@ -214,6 +214,8 @@ export interface EditorState {
   /** the agent's whole turn, from send to the last reply (null when idle) */
   agentTurn: AgentTurn | null
   spaceDown: boolean
+  /** Alt / Option held: the overlay measures from the selection to the hovered layer */
+  altDown: boolean
   saveState: 'saved' | 'saving' | 'unsaved'
   toast: { id: string; text: string } | null
   penDraft: PenDraft | null
@@ -307,6 +309,7 @@ export const useEditor = create<EditorState>((set, get) => {
     agentTrail: {},
     agentTurn: null,
     spaceDown: false,
+    altDown: false,
     saveState: 'saved',
     toast: null,
     penDraft: null,

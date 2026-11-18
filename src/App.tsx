@@ -1,13 +1,16 @@
 import { lazy, Suspense, useEffect, useState } from 'react'
 import { Files } from './app/Files'
 import { createFile, type HomeView } from './app/home-data'
-import { Editor } from './editor/Editor'
 import { isTauri } from './platform/tauri'
 import { TooltipHost, ContextMenuGuard } from './ui/Chrome'
 import { DialogHost } from './ui/Dialogs'
 import './ui/ui.css'
 
 const Landing = lazy(() => import('./site/Landing'))
+// The editor (canvas, codegen, shaders, agent tools) is most of the app's code; the files home
+// and the site don't need it, so it loads on first open and is fetched early once the home is idle.
+const loadEditor = () => import('./editor/Editor')
+const Editor = lazy(() => loadEditor().then((m) => ({ default: m.Editor })))
 
 let creating: Promise<string> | null = null
 
@@ -43,6 +46,18 @@ export default function App() {
     creating.then((id) => location.replace('#/file/' + id))
   }, [route])
 
+  // warm the editor's code while the files home sits idle, so opening a file is instant
+  useEffect(() => {
+    if (route.name !== 'home') return
+    const warm = () => void loadEditor()
+    if (typeof window.requestIdleCallback === 'function') {
+      const h = window.requestIdleCallback(warm, { timeout: 3000 })
+      return () => window.cancelIdleCallback(h)
+    }
+    const t = window.setTimeout(warm, 1200)
+    return () => window.clearTimeout(t)
+  }, [route.name])
+
   useEffect(() => {
     document.title = route.name === 'landing' ? 'Kiln — design that ships as code' : 'Kiln'
     if (route.name === 'landing') window.scrollTo(0, 0)
@@ -61,7 +76,11 @@ export default function App() {
 function Screen({ route }: { route: Route }) {
   switch (route.name) {
     case 'file':
-      return <Editor key={route.id} fileId={route.id} onBack={() => (location.hash = '#/files')} />
+      return (
+        <Suspense fallback={null}>
+          <Editor key={route.id} fileId={route.id} onBack={() => (location.hash = '#/files')} />
+        </Suspense>
+      )
     case 'home':
       return <Files view={route.view} open={(id) => (location.hash = '#/file/' + id)} />
     case 'new':
