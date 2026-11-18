@@ -12,15 +12,18 @@
 <p align="center">
   <a href="https://github.com/splashxmoon/kiln/stargazers"><img src="https://img.shields.io/github/stars/splashxmoon/kiln?style=flat&label=%E2%98%85&color=C2410C" alt="GitHub stars" /></a>
   <img src="https://img.shields.io/badge/license-MIT-C2410C?style=flat" alt="License: MIT" />
-  <img src="https://img.shields.io/badge/macOS%20%7C%20web-57534E?style=flat" alt="macOS and web" />
+  <img src="https://img.shields.io/badge/macOS%20%7C%20Windows%20%7C%20Linux%20%7C%20web-57534E?style=flat" alt="macOS, Windows, Linux and web" />
 </p>
 
 <p align="center">
-  <a href="https://github.com/splashxmoon/kiln/releases/latest/download/Kiln-universal.dmg"><b>Download for Mac</b></a> (Apple silicon and Intel, signed and notarized)
+  <a href="https://github.com/splashxmoon/kiln/releases/latest/download/Kiln-universal.dmg"><b>Mac</b></a> ·
+  <a href="https://github.com/splashxmoon/kiln/releases/latest/download/Kiln-Setup.exe"><b>Windows</b></a> ·
+  <a href="https://github.com/splashxmoon/kiln/releases/latest/download/Kiln-x86_64.AppImage"><b>Linux (AppImage)</b></a> ·
+  <a href="https://github.com/splashxmoon/kiln/releases/latest/download/Kiln-amd64.deb"><b>Linux (.deb)</b></a>
   <br/>or run it in the browser: <code>npm install && npm run dev</code>
 </p>
 
-<!-- TODO before launch: docs/assets/hero.png, the canvas beside its exported code, 1920x1080 -->
+<p align="center"><img src="docs/assets/hero.png" alt="Kiln: a layer selected on the canvas beside the React and Tailwind code it exports" width="960" /></p>
 
 Most design tools end in a handoff: someone redraws the screen in code. In Kiln the canvas already is the code, so there is nothing to translate.
 
@@ -33,7 +36,7 @@ Most design tools end in a handoff: someone redraws the screen in code. In Kiln 
 
 ## Get started
 
-1. **Download Kiln** for Mac above, or run the web app from source.
+1. **Download Kiln** for Mac, Windows or Linux above, or run the web app from source.
 2. **Make a file.** Start blank or from the shop template.
 3. **Connect an agent** (optional). Open the agent panel with `⌘J` and pick a coding tool you're signed in to, or connect one yourself:
 
