@@ -38,9 +38,15 @@ export interface TurnRecord {
   provider: string
   before: KDoc
   after: KDoc
+  /** layers the agent's own edits touched during the turn */
+  agentIds: string[]
+  /** layers the person touched during the turn (their edits, undo or redo): never reverted */
+  personIds: string[]
   /** layers the agent added, changed or removed */
   changed: number
   reverted: boolean
+  /** the document just before the revert, so an undo of the revert un-marks it */
+  preRevert?: KDoc
 }
 
 /** the last few turns that changed the document, oldest first */
@@ -69,9 +75,16 @@ export const lastTurnId = () => turns[turns.length - 1]?.id
 
 /** Count layers whose content differs between two documents (immer keeps unchanged ones identical). */
 export function changedLayers(a: KDoc, b: KDoc) {
-  let n = 0
-  for (const id of new Set([...Object.keys(a.nodes), ...Object.keys(b.nodes)])) if (a.nodes[id] !== b.nodes[id]) n++
-  return n
+  return changedIds(a, b).length
+}
+
+/** The layers that differ between two documents (immer keeps unchanged ones identical). */
+function changedIds(a: KDoc, b: KDoc): string[] {
+  if (a.nodes === b.nodes) return []
+  const out: string[] = []
+  for (const id in a.nodes) if (a.nodes[id] !== b.nodes[id]) out.push(id)
+  for (const id in b.nodes) if (!(id in a.nodes)) out.push(id)
+  return out
 }
 
 /* ------------------------------------------------------------------ watching the store */
@@ -85,13 +98,27 @@ interface Open {
   agentEdits: boolean
   /** the person edited, undid or redid during the turn */
   foreign: boolean
+  agentIds: Set<string>
+  personIds: Set<string>
 }
 let open: Open | null = null
 
 function onStoreChange(s: ReturnType<typeof getEditor>, prev: ReturnType<typeof getEditor>) {
+  // a turn ends, or hands straight over to another (a terminal agent's turn, then one sent here)
+  if (open && s.agentTurn?.startedAt !== open.id) {
+    const t = open
+    open = null
+    finish(t)
+  }
   // a turn starts
-  if (s.agentTurn && !prev.agentTurn) {
-    open = { id: s.agentTurn.startedAt, provider: s.agentTurn.provider, before: s.doc, firstEntry: null, agentEdits: false, foreign: false }
+  if (s.agentTurn && !open) {
+    open = { id: s.agentTurn.startedAt, provider: s.agentTurn.provider, before: s.doc, firstEntry: null, agentEdits: false, foreign: false, agentIds: new Set(), personIds: new Set() }
+  }
+  if (open && s.doc !== prev.doc && s.doc.id === prev.doc.id) {
+    // whose edit was it, and which layers did it touch (the store records the undo step and the
+    // new doc in separate updates, so this goes by who is writing; undo and redo are the person's)
+    const into = writing > 0 ? open.agentIds : open.personIds
+    for (const id of changedIds(prev.doc, s.doc)) into.add(id)
   }
   // undo history moved during the turn: whose was it?
   if (open && s.history !== prev.history) {
@@ -108,32 +135,34 @@ function onStoreChange(s: ReturnType<typeof getEditor>, prev: ReturnType<typeof 
       } else open.foreign = true
     }
   }
-  // the turn ends
-  if (!s.agentTurn && prev.agentTurn && open) {
-    const t = open
-    open = null
-    finish(t)
+  // undoing a revert brings the turn's changes back: it can be reverted again
+  if (s.doc !== prev.doc && turns.some((t) => t.reverted && t.preRevert === s.doc)) {
+    turns = turns.map((t) => (t.reverted && t.preRevert === s.doc ? { ...t, reverted: false, preRevert: undefined } : t))
+    emit()
   }
 }
 
 function finish(t: Open) {
   const s = getEditor()
-  if (!t.agentEdits || s.doc === t.before) return
+  if (!t.agentEdits || s.doc === t.before || s.doc.id !== t.before.id) return
   // fold the agent's steps into one: keep history up to and including the doc the turn started from
   if (!t.foreign && t.firstEntry) {
     const past = s.history.past
     const at = past.lastIndexOf(t.firstEntry)
     if (at >= 0 && at < past.length - 1) s.set({ history: { past: past.slice(0, at + 1), future: [], lastKey: null, lastTime: 0 } })
   }
-  turns = [...turns, { id: t.id, provider: t.provider, before: t.before, after: s.doc, changed: changedLayers(t.before, s.doc), reverted: false }].slice(-KEEP)
+  const agentIds = [...t.agentIds].filter((id) => t.before.nodes[id] !== s.doc.nodes[id])
+  const changed = agentIds.filter((id) => !t.personIds.has(id)).length
+  if (!changed) return
+  turns = [...turns, { id: t.id, provider: t.provider, before: t.before, after: s.doc, agentIds, personIds: [...t.personIds], changed, reverted: false }].slice(-KEEP)
   emit()
 }
 
 useEditor.subscribe(onStoreChange)
 
-/** Forget all turns (a different document was opened). */
+/** Forget all turns, and any turn still open (a different document was opened). */
 useEditor.subscribe((s, prev) => {
-  if (s.doc.id !== prev.doc.id && turns.length) {
+  if (s.doc.id !== prev.doc.id && (turns.length || open)) {
     turns = []
     open = null
     emit()
@@ -150,60 +179,85 @@ export interface RevertResult {
 }
 
 /**
- * Three-way revert at layer level: for each layer the agent changed (before → after), put back
- * `before` only if the layer is still exactly as the agent left it. The same goes for page layer
- * lists, tokens, comments and the file name. Then repair links, so a kept layer is never left
- * hanging off a parent that no longer lists it.
+ * Three-way revert at layer level: for each layer the agent's edits touched (before → after),
+ * put back `before` only if the layer is still exactly as the agent left it and the person
+ * didn't touch it during the turn. A frame that holds a layer being kept stays too when
+ * reverting it would remove the frame or take the layer out of it (the layer would jump, or
+ * be left in a loop). Page layer lists, tokens, comments and the file name go back the same
+ * way. Then links are repaired. Returns null when there is nothing left to revert.
  */
 export function revertTurn(id: number): RevertResult | null {
   const t = getTurn(id)
   if (!t || t.reverted) return null
   const { before, after } = t
   const cur = getEditor().doc
-  let restored = 0
+  const person = new Set(t.personIds)
+  const isKept = (nid: string) => person.has(nid) || cur.nodes[nid] !== after.nodes[nid]
+
+  // frames that must stay because a layer inside them is kept (by the agent's change or the person's)
+  const held = new Set<string>()
+  const keptLayers = [...t.agentIds.filter(isKept), ...t.personIds].filter((nid) => cur.nodes[nid])
+  for (const nid of keptLayers) {
+    let child = nid
+    for (let p = cur.nodes[nid]?.parentId ?? null; p && cur.nodes[p]; child = p, p = cur.nodes[p].parentId) {
+      if (held.has(p)) break
+      const b = before.nodes[p]
+      if (!b || !b.children.includes(child)) held.add(p)
+    }
+  }
+
+  const restore: string[] = []
   let kept = 0
+  for (const nid of t.agentIds) {
+    if (before.nodes[nid] === after.nodes[nid]) continue
+    if (isKept(nid) || held.has(nid)) kept++
+    else restore.push(nid)
+  }
+
+  // pages: per page; added ones go, removed ones come back
+  let pages: KDoc['pages'] | null = null
+  if (before.pages !== after.pages) {
+    const next = [...cur.pages]
+    for (const bp of before.pages) {
+      const ap = after.pages.find((p) => p.id === bp.id)
+      const i = next.findIndex((p) => p.id === bp.id)
+      if (!ap) {
+        if (i < 0) next.splice(Math.min(before.pages.indexOf(bp), next.length), 0, bp)
+      } else if (ap !== bp && i >= 0 && next[i] === ap) next[i] = bp
+    }
+    for (const ap of after.pages) {
+      if (before.pages.some((p) => p.id === ap.id)) continue
+      const i = next.findIndex((p) => p.id === ap.id)
+      if (i >= 0 && next[i] === ap) next.splice(i, 1)
+    }
+    if (next.length && (next.length !== cur.pages.length || next.some((p, i) => p !== cur.pages[i]))) pages = next
+  }
+  const tokens = before.tokens !== after.tokens && cur.tokens === after.tokens
+  const comments = before.comments !== after.comments && cur.comments === after.comments
+  const name = before.name !== after.name && cur.name === after.name
+  // nothing left as the agent made it (all changed or undone since): no empty undo step
+  if (!restore.length && !pages && !tokens && !comments && !name) return { restored: 0, kept }
+
   getEditor().update((d: Draft<KDoc>) => {
-    for (const nid of new Set([...Object.keys(before.nodes), ...Object.keys(after.nodes)])) {
-      if (before.nodes[nid] === after.nodes[nid]) continue
-      if (cur.nodes[nid] !== after.nodes[nid]) {
-        kept++
-        continue
-      }
-      restored++
+    for (const nid of restore) {
       // a copy: the stored layer is frozen by immer, and repairLinks may still write its links
       const b = before.nodes[nid]
       if (b) d.nodes[nid] = { ...b, children: [...b.children] } as Draft<KDoc['nodes'][string]>
       else delete d.nodes[nid]
     }
-    // pages: per page; added ones go, removed ones come back
-    if (before.pages !== after.pages) {
-      const pages = [...cur.pages]
-      for (const bp of before.pages) {
-        const ap = after.pages.find((p) => p.id === bp.id)
-        const i = pages.findIndex((p) => p.id === bp.id)
-        if (!ap) {
-          if (i < 0) pages.splice(Math.min(before.pages.indexOf(bp), pages.length), 0, bp)
-        } else if (ap !== bp && i >= 0 && pages[i] === ap) pages[i] = bp
-      }
-      for (const ap of after.pages) {
-        if (before.pages.some((p) => p.id === ap.id)) continue
-        const i = pages.findIndex((p) => p.id === ap.id)
-        if (i >= 0 && pages[i] === ap) pages.splice(i, 1)
-      }
-      // copies, for the same reason: these are frozen pages, not drafts
-      if (pages.length) d.pages = pages.map((p) => ({ ...p, children: [...p.children] })) as Draft<KDoc['pages']>
-    }
-    if (before.tokens !== after.tokens && cur.tokens === after.tokens) d.tokens = before.tokens as Draft<KDoc['tokens']>
-    if (before.comments !== after.comments && cur.comments === after.comments) d.comments = before.comments as Draft<KDoc['comments']>
-    if (before.name !== after.name && cur.name === after.name) d.name = before.name
+    // copies, for the same reason: these are frozen pages, not drafts
+    if (pages) d.pages = pages.map((p) => ({ ...p, children: [...p.children] })) as Draft<KDoc['pages']>
+    if (tokens) d.tokens = before.tokens as Draft<KDoc['tokens']>
+    if (comments) d.comments = before.comments as Draft<KDoc['comments']>
+    if (name) d.name = before.name
     repairLinks(d)
   })
   const s = getEditor()
   const pageId = s.doc.pages.some((p) => p.id === s.pageId) ? s.pageId : s.doc.pages[0]?.id
   s.set({ selection: s.selection.filter((x) => s.doc.nodes[x]), pageId })
-  turns = turns.map((x) => (x.id === id ? { ...x, reverted: true } : x))
+  turns = turns.map((x) => (x.id === id ? { ...x, reverted: true, preRevert: cur } : x))
   emit()
-  return { restored, kept }
+  return { restored: restore.length, kept }
 }
 
 /**

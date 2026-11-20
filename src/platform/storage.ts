@@ -6,7 +6,7 @@
  */
 import { nanoid } from 'nanoid'
 import type { KDoc } from '../editor/types'
-import { migrate, versionToSave } from '../editor/migrate'
+import { DOC_VERSION, NewerFileError, isNewerThanApp, migrate } from '../editor/migrate'
 import {
   desktopCreateProject,
   desktopDeleteFile,
@@ -574,5 +574,10 @@ export const storage: Storage = {
     const raw = await backend.load(id)
     return raw ? migrate(raw) : null
   },
-  save: (doc, opts) => backend.save(doc.version === versionToSave(doc) ? doc : { ...doc, version: versionToSave(doc) }, opts),
+  save: async (doc, opts) => {
+    // an older Kiln would write its own format under the newer version's label, and the newer
+    // app would then skip migrating it: such a file is read-only here
+    if (isNewerThanApp(doc)) throw new NewerFileError()
+    return backend.save(doc.version === DOC_VERSION ? doc : { ...doc, version: DOC_VERSION }, opts)
+  },
 }

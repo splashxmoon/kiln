@@ -20,7 +20,7 @@ import { sampleCanvasColor } from './eyedropper'
 import { registerEyedropper } from '../ui/eyedropper'
 import { ensureFont } from './fonts'
 import type { KDoc } from './types'
-import { isNewerThanApp } from './migrate'
+import { isNewerThanApp, UnreadableFileError } from './migrate'
 import './editor.css'
 
 // the dev demo ("Agent: play demo activity") only loads where it can be used
@@ -74,10 +74,13 @@ function refreshThumbnail() {
 /** Save now (with a fresh thumbnail) — used before leaving the editor. */
 export async function flushSave() {
   const s = getEditor()
-  if (!s.doc.pages.length) return
+  // a file from a newer Kiln is read-only here (storage would refuse it)
+  if (!s.doc.pages.length || isNewerThanApp(s.doc)) return
   const first = firstBoard()
   const thumbnail = (first && (await snapshotNode(first, { maxSize: 480 }).catch(() => null))) || currentThumbnail()
   const doc: KDoc = { ...getEditor().doc, thumbnail }
+  // this is now the newest snapshot: a later autosave must not send back an older idle one
+  if (thumbnail) Object.assign(thumb, { docId: doc.id, url: thumbnail, at: Date.now() })
   try {
     await storage.save(doc)
     if (getEditor().doc.updatedAt === doc.updatedAt) getEditor().set({ doc, saveState: 'saved' })
@@ -111,10 +114,11 @@ function useAutosave() {
         }
       }, 700)
     }
-    if (getEditor().saveState === 'unsaved') schedule()
-    // same trigger as before: a new doc or a save state change, while there are unsaved edits
+    if (getEditor().saveState === 'unsaved' && !isNewerThanApp(getEditor().doc)) schedule()
+    // same trigger as before: a new doc or a save state change, while there are unsaved edits;
+    // never for a file from a newer Kiln, which is read-only here
     const unsubscribe = useEditor.subscribe((s, prev) => {
-      if (s.saveState === 'unsaved' && (s.doc !== prev.doc || s.saveState !== prev.saveState)) schedule()
+      if (s.saveState === 'unsaved' && (s.doc !== prev.doc || s.saveState !== prev.saveState) && !isNewerThanApp(s.doc)) schedule()
     })
     return () => {
       unsubscribe()
@@ -125,7 +129,7 @@ function useAutosave() {
   useEffect(() => {
     const f = (e: BeforeUnloadEvent) => {
       if (getEditor().saveState !== 'saved') {
-        void storage.save({ ...getEditor().doc, thumbnail: currentThumbnail() })
+        void storage.save({ ...getEditor().doc, thumbnail: currentThumbnail() }).catch(() => {})
         e.preventDefault()
       }
     }
@@ -133,7 +137,7 @@ function useAutosave() {
     return () => {
       window.removeEventListener('beforeunload', f)
       // backstop: leaving the editor by any route never drops pending edits
-      if (getEditor().saveState !== 'saved') void storage.save({ ...getEditor().doc, thumbnail: currentThumbnail() })
+      if (getEditor().saveState !== 'saved') void storage.save({ ...getEditor().doc, thumbnail: currentThumbnail() }).catch(() => {})
     }
   }, [])
 }
@@ -187,7 +191,7 @@ const RIGHT_MAX = 640
 const RIGHT_DEFAULT = 380
 
 export function Editor({ fileId, onBack }: { fileId: string; onBack: () => void }) {
-  const [status, setStatus] = useState<'loading' | 'ready' | 'missing'>('loading')
+  const [status, setStatus] = useState<'loading' | 'ready' | 'missing' | 'unreadable'>('loading')
   const rightTab = useEditor((s) => s.rightTab)
   const loadedId = useEditor((s) => s.doc.id)
 
@@ -205,14 +209,15 @@ export function Editor({ fileId, onBack }: { fileId: string; onBack: () => void 
         for (const n of Object.values(doc.nodes)) if (n.text) ensureFont(n.text.fontFamily)
         getEditor().loadDoc(doc)
         setStatus('ready')
-        if (isNewerThanApp(doc)) getEditor().notify('This file was saved by a newer Kiln. Update Kiln before editing it, or some changes may not show.')
+        if (isNewerThanApp(doc)) getEditor().notify('This file was saved by a newer Kiln, so changes here won’t be saved. Update Kiln to edit it.')
         requestAnimationFrame(() => requestAnimationFrame(() => zoomToFit()))
       })
       .catch((e) => {
         if (!alive) return
         console.error('Kiln: could not open the file', e)
-        getEditor().notify((e as Error).message || 'Could not open the file')
-        setStatus('missing')
+        // the file is there but can't be read: say so, rather than that it is gone
+        setStatus(e instanceof UnreadableFileError ? 'unreadable' : 'missing')
+        if (!(e instanceof UnreadableFileError)) getEditor().notify((e as Error).message || 'Could not open the file')
       })
     return () => {
       alive = false
@@ -275,10 +280,10 @@ export function Editor({ fileId, onBack }: { fileId: string; onBack: () => void 
     window.addEventListener('pointerup', up)
   }
 
-  if (status === 'missing')
+  if (status === 'missing' || status === 'unreadable')
     return (
       <div className="k-app k-center">
-        <p>That file doesn’t exist anymore.</p>
+        <p>{status === 'missing' ? 'That file doesn’t exist anymore.' : 'Kiln can’t read this file. It may be damaged or not a Kiln file.'}</p>
         <button className="k-btn-primary" onClick={onBack}>
           Back to files
         </button>

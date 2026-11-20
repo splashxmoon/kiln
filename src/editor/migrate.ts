@@ -56,23 +56,35 @@ export class UnreadableFileError extends Error {
 /**
  * Bring a stored document up to DOC_VERSION. Takes the raw parsed JSON and returns a new
  * object when anything changed (the input is never modified). A file from a newer Kiln is
- * returned as it is; `isNewerThanApp` tells the editor to warn about it.
+ * returned as it is; `isNewerThanApp` marks it read-only (storage refuses to save it).
  */
 export function migrate(raw: unknown): KDoc {
   if (!isObj(raw)) throw new UnreadableFileError('not an object')
   if (typeof raw.id !== 'string' || !raw.id) throw new UnreadableFileError('no id')
   const from = typeof raw.version === 'number' && Number.isFinite(raw.version) ? Math.max(0, Math.floor(raw.version)) : 0
-  if (from >= DOC_VERSION) return raw as unknown as KDoc
+  if (from >= DOC_VERSION) return checked(raw)
   const doc = structuredClone(raw)
   for (let v = from; v < DOC_VERSION; v++) {
     STEPS[v](doc)
     doc.version = v + 1
   }
+  return checked(doc)
+}
+
+/** The least the editor needs to open a file, whatever its version: layers and at least one page. */
+function checked(doc: Json): KDoc {
+  if (!isObj(doc.nodes)) throw new UnreadableFileError('no layers')
+  if (!Array.isArray(doc.pages) || !doc.pages.length || !doc.pages.every(isObj)) throw new UnreadableFileError('no pages')
   return doc as unknown as KDoc
+}
+
+/** Saving a file from a newer Kiln would write this version's format under the newer label. */
+export class NewerFileError extends Error {
+  constructor() {
+    super('This file was saved by a newer Kiln. Update Kiln to save changes to it.')
+    this.name = 'NewerFileError'
+  }
 }
 
 /** Saved by a newer Kiln than this one: it opens, but parts of it may not show or survive a save. */
 export const isNewerThanApp = (doc: KDoc) => (doc.version ?? 0) > DOC_VERSION
-
-/** The version to write: never lower than the file's own, so an old app can't relabel a newer file. */
-export const versionToSave = (doc: KDoc) => Math.max(doc.version ?? 0, DOC_VERSION)

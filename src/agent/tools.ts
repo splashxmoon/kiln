@@ -613,8 +613,10 @@ export async function runTool(name: string, args: Args = {}): Promise<McpContent
   activityStart(name, label.verb, toolNodeIds(name, a))
   touched = null
   try {
-    // edits made inside count as the agent's, so a turn can fold into one undo step (turns.ts)
-    const out = await asAgent(async () => def.run(a))
+    // edits made inside count as the agent's, so a turn can fold into one undo step (turns.ts).
+    // Only tools that edit: a read such as a screenshot can take a while, and the person's own
+    // edits in the meantime must stay theirs
+    const out = label.kind === 'read' ? await def.run(a) : await asAgent(async () => def.run(a))
     // the nodes it changed glow: the ones it pointed at (created ids included), else the ones it was given
     if (label.kind === 'edit') markTrail(touched ?? getEditor().agentAction?.ids ?? [])
     // let layout settle so follow-up reads (measure, screenshot) see the result

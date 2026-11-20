@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { DOC_VERSION, isNewerThanApp, migrate, UnreadableFileError, versionToSave } from './migrate'
+import { DOC_VERSION, isNewerThanApp, migrate, UnreadableFileError } from './migrate'
 import { emptyDoc } from './factory'
-import type { KDoc } from './types'
 
 /** A file as Kiln saved it before versioning, with the gaps old builds could leave. */
 function legacyFile() {
@@ -60,16 +59,18 @@ describe('migrate', () => {
     const doc = migrate(newer)
     expect(doc).toBe(newer)
     expect(isNewerThanApp(doc)).toBe(true)
-    expect(versionToSave(doc)).toBe(DOC_VERSION + 5) // an older app never relabels it
-  })
-
-  it('stamps the current version on save for old files', () => {
-    expect(versionToSave({ ...emptyDoc(), version: undefined } as KDoc)).toBe(DOC_VERSION)
   })
 
   it('refuses things that are not Kiln files', () => {
     expect(() => migrate(null)).toThrow(UnreadableFileError)
     expect(() => migrate([])).toThrow(UnreadableFileError)
     expect(() => migrate({ name: 'no id' })).toThrow(UnreadableFileError)
+  })
+
+  it('refuses files with no layers or no pages, at any version', () => {
+    expect(() => migrate({ id: 'x' })).toThrow(UnreadableFileError)
+    expect(() => migrate({ id: 'y', version: DOC_VERSION })).toThrow(UnreadableFileError)
+    expect(() => migrate({ id: 'z', version: DOC_VERSION, nodes: {}, pages: [] })).toThrow(UnreadableFileError)
+    expect(() => migrate({ ...emptyDoc(), version: DOC_VERSION + 1, pages: undefined })).toThrow(UnreadableFileError)
   })
 })
