@@ -25,7 +25,10 @@ export interface SnapshotOptions {
 const JPEG_BACKGROUND = '#ffffff'
 
 function encode(canvas: HTMLCanvasElement, format: SnapshotOptions['format']) {
-  return format === 'jpeg' ? canvas.toDataURL('image/jpeg', 0.92) : canvas.toDataURL('image/png')
+  const url = format === 'jpeg' ? canvas.toDataURL('image/jpeg', 0.92) : canvas.toDataURL('image/png')
+  // a canvas past the browser's size limit encodes as "data:," (no pixels): fail rather than save an empty file
+  if (!url.includes(';base64,')) throw new Error('The image is too large to render at this scale')
+  return url
 }
 
 function loadImage(src: string): Promise<HTMLImageElement> {
@@ -284,17 +287,32 @@ export async function snapshotNode(id: string, opts: SnapshotOptions = {}): Prom
   let scale = opts.scale ?? 1
   if (opts.maxSize) scale = Math.min(scale, opts.maxSize / Math.max(w, h))
   const bg = opts.background ?? (opts.format === 'jpeg' ? JPEG_BACKGROUND : undefined)
+  // an off-screen artboard is skipped by the browser (perf.css), so its web fonts may never have
+  // been requested: render it for the snapshot and wait for its fonts, or text paints in a fallback
+  const culled = el.closest<HTMLElement>('[data-cull]')
+  const prevVisibility = culled?.style.contentVisibility ?? ''
+  if (culled) culled.style.contentVisibility = 'visible'
+  try {
+    el.getBoundingClientRect()
+    await document.fonts?.ready
+    return await paint(el, w, h, scale, bg, opts.format)
+  } finally {
+    if (culled) culled.style.contentVisibility = prevVisibility
+  }
+}
+
+async function paint(el: HTMLElement, w: number, h: number, scale: number, bg: string | undefined, format: SnapshotOptions['format']): Promise<string | null> {
   const hasCanvas = !!el.querySelector('canvas')
   const isWebKit = /AppleWebKit/.test(navigator.userAgent) && !/Chrome|Chromium|Edg/.test(navigator.userAgent)
   if (!hasCanvas && !isWebKit) {
     try {
-      return await viaForeignObject(el, w, h, scale, bg, opts.format)
+      return await viaForeignObject(el, w, h, scale, bg, format)
     } catch {
       /* fall through */
     }
   }
   try {
-    return await viaBoxPainter(el, w, h, scale, bg, opts.format)
+    return await viaBoxPainter(el, w, h, scale, bg, format)
   } catch {
     return null
   }
@@ -321,8 +339,25 @@ export type ImageFormat = 'png' | 'jpg' | 'svg'
 
 /** A file name from a layer name, e.g. `Hero card@2x.png` → `Hero-card@2x.png`. */
 export function imageFileName(name: string, format: ImageFormat, scale: number) {
-  const base = name.replace(/[^\w-]+/g, '-').replace(/^-+|-+$/g, '') || 'layer'
+  let base = name.replace(/[^\w-]+/g, '-').replace(/^-+|-+$/g, '') || 'layer'
+  // names Windows reserves for devices (the desktop app refuses to write them)
+  if (/^(con|prn|aux|nul|com\d|lpt\d)$/i.test(base)) base += '-'
   return `${base}${format !== 'svg' && scale !== 1 ? `@${scale}x` : ''}.${format}`
+}
+
+/**
+ * Makes file names unique by numbering repeats (`Card@2x.png`, `Card-2@2x.png`, …). Compared
+ * without case, since the macOS and Windows file systems treat `Card` and `card` as one file,
+ * and a number is skipped when a layer already has that name.
+ */
+export function uniqueFileNames(paths: readonly string[]): string[] {
+  const used = new Set<string>()
+  return paths.map((path) => {
+    let out = path
+    for (let n = 2; used.has(out.toLowerCase()); n++) out = path.replace(/(@\d+x)?\.\w+$/, (m) => `-${n}${m}`)
+    used.add(out.toLowerCase())
+    return out
+  })
 }
 
 /** One layer as an image file (a data URL), or null when it can't be rendered. */
@@ -385,8 +420,7 @@ export async function exportArtboards(format: ImageFormat, scale: number): Promi
     const n = s.doc.nodes[id]
     return n && n.type === 'frame' && n.visible
   })
-  const files: ImageFile[] = []
-  const used = new Map<string, number>()
+  const rendered: { name: string; url: string }[] = []
   let failed = 0
   for (const id of ids) {
     const url = await exportImage(id, format, scale)
@@ -394,12 +428,10 @@ export async function exportArtboards(format: ImageFormat, scale: number): Promi
       failed++
       continue
     }
-    let path = imageFileName(s.doc.nodes[id].name, format, scale)
-    const n = (used.get(path) ?? 0) + 1
-    used.set(path, n)
-    if (n > 1) path = path.replace(/(@\d+x)?\.\w+$/, (m) => `-${n}${m}`)
-    files.push({ path, url })
+    rendered.push({ name: imageFileName(s.doc.nodes[id].name, format, scale), url })
   }
+  const paths = uniqueFileNames(rendered.map((r) => r.name))
+  const files: ImageFile[] = rendered.map((r, i) => ({ path: paths[i], url: r.url }))
   const where = await saveImages(files)
   return { saved: files.length, failed, where }
 }

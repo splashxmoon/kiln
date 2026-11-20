@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from 'react'
+import { Component, lazy, Suspense, useEffect, useState, type ReactNode } from 'react'
 import { Files } from './app/Files'
 import { createFile, type HomeView } from './app/home-data'
 import { isTauri } from './platform/tauri'
@@ -49,7 +49,7 @@ export default function App() {
   // warm the editor's code while the files home sits idle, so opening a file is instant
   useEffect(() => {
     if (route.name !== 'home') return
-    const warm = () => void loadEditor()
+    const warm = () => void loadEditor().catch(() => {}) // a failed warm-up is retried on open
     if (typeof window.requestIdleCallback === 'function') {
       const h = window.requestIdleCallback(warm, { timeout: 3000 })
       return () => window.cancelIdleCallback(h)
@@ -73,13 +73,40 @@ export default function App() {
   )
 }
 
+/**
+ * The editor loads as its own chunk. If that fails (offline, or the site was redeployed and the
+ * old chunk is gone), say so with a way out instead of leaving the whole app blank.
+ */
+class LoadBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false }
+  static getDerivedStateFromError() {
+    return { failed: true }
+  }
+  componentDidCatch(e: unknown) {
+    console.error('Kiln: the editor failed', e)
+  }
+  render() {
+    if (!this.state.failed) return this.props.children
+    return (
+      <div className="k-app k-center">
+        <p>Kiln couldn’t open the editor. Check your connection and reload.</p>
+        <button className="k-btn-primary" onClick={() => location.reload()}>
+          Reload
+        </button>
+      </div>
+    )
+  }
+}
+
 function Screen({ route }: { route: Route }) {
   switch (route.name) {
     case 'file':
       return (
-        <Suspense fallback={null}>
-          <Editor key={route.id} fileId={route.id} onBack={() => (location.hash = '#/files')} />
-        </Suspense>
+        <LoadBoundary key={route.id}>
+          <Suspense fallback={null}>
+            <Editor key={route.id} fileId={route.id} onBack={() => (location.hash = '#/files')} />
+          </Suspense>
+        </LoadBoundary>
       )
     case 'home':
       return <Files view={route.view} open={(id) => (location.hash = '#/file/' + id)} />

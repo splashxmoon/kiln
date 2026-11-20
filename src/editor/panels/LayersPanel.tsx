@@ -387,25 +387,37 @@ const LayerRow = memo(function LayerRow({ id, depth, open, selected, parentSelec
  * of the drawn window (the list is virtualised) the field unmounts without a blur: it saves then too.
  */
 function RenameInput({ id, name, done }: { id: string; name: string; done: () => void }) {
-  const input = useRef<HTMLInputElement>(null)
+  // the typed text is kept here: by the time an unmount's cleanup runs, the input ref is gone
+  const value = useRef(name)
   const settled = useRef(false)
+  const mounted = useRef(false)
   const finish = useRef<(save: boolean) => void>(() => {})
   useLayoutEffect(() => {
     finish.current = (save) => {
       if (settled.current) return
       settled.current = true
-      const v = input.current?.value.trim()
+      const v = value.current.trim()
       if (save && v && v !== getEditor().doc.nodes[id]?.name) getEditor().setProps([id], (n) => void (n.name = v))
       done()
     }
   })
-  useEffect(() => () => finish.current(true), [])
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+      // a real unmount (the row scrolled out) saves; StrictMode's test unmount in dev remounts
+      // straight away, before this runs, so the field stays open
+      queueMicrotask(() => {
+        if (!mounted.current) finish.current(true)
+      })
+    }
+  }, [])
   return (
     <input
-      ref={input}
       className="k-layer-rename"
       autoFocus
       defaultValue={name}
+      onChange={(e) => (value.current = e.target.value)}
       onClick={(e) => e.stopPropagation()}
       onBlur={() => finish.current(true)}
       onKeyDown={(e) => {
@@ -476,9 +488,11 @@ function Layers() {
     if (allOpen(selection, expanded)) return scrollTo('selection', rows, selected)
     reveal.current = 'selection'
     expandTo(selection)
-    // only a new selection reveals; edits and scrolling later never jump the list
+    // only a new selection reveals; edits and scrolling later never jump the list. It runs again
+    // when a search is cleared (a result picked while searching is shown in place) and once the
+    // list element exists (the Layers tab opening with a selection already made)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selection])
+  }, [selection, !!results, listEl])
 
   useLayoutEffect(() => {
     const want = reveal.current

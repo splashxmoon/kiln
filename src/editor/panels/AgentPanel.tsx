@@ -162,6 +162,7 @@ function TurnFooter({ id }: { id: number | undefined }) {
   const revert = () => {
     const r = revertTurn(turn.id)
     if (!r) return
+    if (!r.restored) return getEditor().notify('Nothing to revert: everything this turn changed has been changed or undone since.')
     const kept = r.kept ? ` · kept ${r.kept} you changed since` : ''
     getEditor().notify(`Reverted the agent's changes to ${r.restored} layer${r.restored === 1 ? '' : 's'}${kept}. Undo brings them back.`)
   }

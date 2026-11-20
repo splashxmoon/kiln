@@ -75,6 +75,8 @@ export function Overlay({ createRect }: { createRect: Rect | null }) {
   const presence = useEditor((s) => s.view.presence)
   const showComments = useEditor((s) => s.view.showComments)
   const altDown = useEditor((s) => s.altDown)
+  /** a mouse button is down: some gesture is running */
+  const [pressed, setPressed] = useState(false)
   const [m, setM] = useState<Measured>({ sel: {}, hover: null, target: null, artboards: [], gaps: [], padding: [], focus: {}, glow: [], cursor: null, provider: '', box: { w: 0, h: 0 }, comments: {}, size: null, measureTo: null })
   const rootRef = useRef<HTMLDivElement>(null)
   const cacheRef = useRef<RectCache | null>(null)
@@ -179,7 +181,8 @@ export function Overlay({ createRect }: { createRect: Rect | null }) {
     const comments: Record<string, Rect> = {}
     // Alt measuring: to the hovered layer, or (hovering nothing else) to the selection's parent
     let measureTo: Rect | null = null
-    if (altDown && selection.length && !drag && !marquee && !editingTextId) {
+    // a hover affordance: not during a gesture (Alt-resize from the centre, Alt-drag, a marquee)
+    if (altDown && !pressed && selection.length && !drag && !marquee && !editingTextId) {
       let to = hoverId && !selection.includes(hoverId) && doc.nodes[hoverId] ? hoverId : null
       if (!to) {
         const parents = new Set(selection.map((id) => doc.nodes[id]?.parentId ?? null))
@@ -204,7 +207,7 @@ export function Overlay({ createRect }: { createRect: Rect | null }) {
       size,
       measureTo,
     }))
-  }, [doc, selection, hoverId, drag, tick, pageId, page, agentFocus, agentAction, agentTrail, agentTurn, altDown, marquee, editingTextId])
+  }, [doc, selection, hoverId, drag, tick, pageId, page, agentFocus, agentAction, agentTrail, agentTurn, altDown, pressed, marquee, editingTextId])
 
   // Alt is also read off pointer events: its key up is lost when the window loses focus mid-press
   // (and Windows can swallow it), so the measuring never sticks on
@@ -212,15 +215,21 @@ export function Overlay({ createRect }: { createRect: Rect | null }) {
     const sync = (e: PointerEvent) => {
       const s = getEditor()
       if (s.altDown !== e.altKey) s.set({ altDown: e.altKey })
+      if (e.type === 'pointerdown') setPressed(true)
     }
+    const release = () => setPressed(false)
     const off = () => {
       if (getEditor().altDown) getEditor().set({ altDown: false })
     }
     window.addEventListener('pointermove', sync, true)
     window.addEventListener('pointerdown', sync, true)
+    window.addEventListener('pointerup', release, true)
+    window.addEventListener('pointercancel', release, true)
     window.addEventListener('blur', off)
     document.addEventListener('visibilitychange', off)
     return () => {
+      window.removeEventListener('pointerup', release, true)
+      window.removeEventListener('pointercancel', release, true)
       window.removeEventListener('pointermove', sync, true)
       window.removeEventListener('pointerdown', sync, true)
       window.removeEventListener('blur', off)

@@ -136,4 +136,87 @@ describe('agent turns in the undo history', () => {
     expect(getEditor().history.past.slice(0, past.length).map((x) => x.pages[0].children.length)).toEqual(past)
     expect(getTurn(id)?.before.pages[0].children).toEqual([ids.a, ids.b])
   })
+
+  it('never reverts what the person changed during the turn', async () => {
+    startTurn()
+    await agentEdit((d) => void (d.nodes[ids.a].x = 10))
+    userEdit((d) => void (d.nodes[ids.b].name = 'Mine'))
+    await agentEdit((d) => void (d.nodes[ids.a].y = 10))
+    endTurn()
+    const id = lastTurnId()!
+    expect(getTurn(id)?.changed).toBe(1)
+    expect(revertTurn(id)).toEqual({ restored: 1, kept: 0 })
+    expect(node(ids.a).x).toBe(0)
+    expect(node(ids.b).name).toBe('Mine')
+  })
+
+  it('keeps the frame around a layer it keeps, so the layer does not jump', async () => {
+    startTurn()
+    let frame = ''
+    await agentEdit((d) => {
+      const f = createNode('frame', ids.pageId, { name: 'Wrapper', x: 500, y: 300 })
+      frame = f.id
+      d.nodes[f.id] = f
+      d.pages[0].children.push(f.id)
+      // move A into it, at a position relative to the frame
+      d.pages[0].children = d.pages[0].children.filter((c) => c !== ids.a)
+      d.nodes[ids.a].parentId = f.id
+      d.nodes[ids.a].x = 20
+      f.children.push(ids.a)
+    })
+    endTurn()
+    const id = lastTurnId()!
+    userEdit((d) => void (d.nodes[ids.a].name = 'Recoloured'))
+    revertTurn(id)
+    expect(node(frame)).toBeDefined()
+    expect(node(ids.a).parentId).toBe(frame)
+    expect(node(frame).children).toContain(ids.a)
+  })
+
+  it('reverts nothing, and adds no undo step, when everything was changed since', async () => {
+    startTurn()
+    await agentEdit((d) => void (d.nodes[ids.a].x = 10))
+    endTurn()
+    const id = lastTurnId()!
+    userEdit((d) => void (d.nodes[ids.a].x = 99))
+    const steps = getEditor().history.past.length
+    expect(revertTurn(id)).toEqual({ restored: 0, kept: 1 })
+    expect(getEditor().history.past.length).toBe(steps)
+    expect(getTurn(id)?.reverted).toBe(false)
+  })
+
+  it('can revert again after the revert is undone', async () => {
+    startTurn()
+    await agentEdit((d) => void (d.nodes[ids.a].x = 10))
+    endTurn()
+    const id = lastTurnId()!
+    revertTurn(id)
+    expect(getTurn(id)?.reverted).toBe(true)
+    getEditor().undo()
+    expect(node(ids.a).x).toBe(10)
+    expect(getTurn(id)?.reverted).toBe(false)
+  })
+
+  it('closes a turn that hands straight over to another', async () => {
+    startTurn()
+    await agentEdit((d) => void (d.nodes[ids.a].x = 10))
+    const first = getEditor().agentTurn!.startedAt
+    startTurn() // a new turn replaces it without the first ending
+    await agentEdit((d) => void (d.nodes[ids.b].x = 300))
+    const second = getEditor().agentTurn!.startedAt
+    endTurn()
+    expect(getTurn(first)?.changed).toBe(1)
+    expect(getTurn(second)?.changed).toBe(1)
+    revertTurn(second)
+    expect(node(ids.b).x).toBe(200)
+    expect(node(ids.a).x).toBe(10)
+  })
+
+  it('drops a turn left open when another file is opened', async () => {
+    startTurn()
+    await agentEdit((d) => void (d.nodes[ids.a].x = 10))
+    setup() // another document
+    endTurn()
+    expect(lastTurnId()).toBeUndefined()
+  })
 })

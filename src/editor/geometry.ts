@@ -14,6 +14,8 @@ let cameraRef: Camera = { x: 0, y: 0, zoom: 1 }
  * world and still carries that id (React may replace it, e.g. when a text layer starts editing).
  */
 const elCache = new Map<string, Element>()
+const SWEEP_MIN = 2000
+let sweepAt = SWEEP_MIN
 
 export function registerWorld(el: HTMLElement | null) {
   worldEl = el
@@ -33,8 +35,12 @@ export function nodeEl(id: string): HTMLElement | null {
   const el = worldEl.querySelector<HTMLElement>(`[data-id="${CSS.escape(id)}"]`)
   if (el) elCache.set(id, el)
   else elCache.delete(id)
-  // deleted layers would otherwise pile up over a long session
-  if (elCache.size > 20000) elCache.clear()
+  // deleted layers and other pages' layers would otherwise keep their detached elements (and
+  // image data) alive: drop the disconnected ones whenever the map doubles
+  if (elCache.size > sweepAt) {
+    for (const [k, v] of elCache) if (!v.isConnected) elCache.delete(k)
+    sweepAt = Math.max(SWEEP_MIN, elCache.size * 2)
+  }
   return el
 }
 

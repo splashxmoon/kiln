@@ -666,8 +666,12 @@ fn move_to_trash(root: &Path, src: &Path, id: &str, project_id: Option<&str>) ->
 /// A file's id, name and thumbnail for its trash sidecar: from the index if it is current there,
 /// else read from the file.
 fn trashed_meta(root: &Path, src: &Path, stem: &str) -> FileMeta {
-    let size = fs::metadata(src).map(|m| m.len()).ok();
-    let indexed = read_index(root).into_values().find(|e| e.id == stem && Some(e.size) == size);
+    // current only if both size and mtime match, as in list_in: a same-length rename keeps the size
+    let md = fs::metadata(src).ok();
+    let indexed = md.and_then(|md| {
+        let (mtime, size) = (mtime_ms(&md), md.len());
+        read_index(root).into_values().find(|e| e.id == stem && e.size == size && (e.mtime - mtime).abs() < 0.001)
+    });
     match indexed {
         Some(e) => FileMeta { id: e.id, name: e.name, updated_at: e.updated_at, thumbnail: e.thumbnail, project_id: None },
         None => match read_json(src) {

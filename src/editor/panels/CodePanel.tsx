@@ -27,7 +27,18 @@ const FORMATS: SelectOption<Tab>[] = [
  * Immer keeps unchanged layers the same objects, so this list changes only when one of those
  * layers does: an edit elsewhere, a pan or a hover doesn't regenerate the code.
  */
+/** The last walk, reused while the layers, tokens, tab and target are the same (camera moves, hover…). */
+let lastInputs: { nodes: unknown; tokens: unknown; tab: Tab; targetId: string | undefined; out: unknown[] } | null = null
+
 function exportInputs(s: EditorState, tab: Tab, targetId: string | undefined): unknown[] {
+  const l = lastInputs
+  if (l && l.nodes === s.doc.nodes && l.tokens === s.doc.tokens && l.tab === tab && l.targetId === targetId) return l.out
+  const out = walkInputs(s, tab, targetId)
+  lastInputs = { nodes: s.doc.nodes, tokens: s.doc.tokens, tab, targetId, out }
+  return out
+}
+
+function walkInputs(s: EditorState, tab: Tab, targetId: string | undefined): unknown[] {
   const doc = s.doc
   // the tokens file lists the fonts of every text layer, so it follows the whole document
   if (tab === 'tokens') return [doc.tokens, doc.nodes]
@@ -113,13 +124,15 @@ export function CodePanel() {
     const page = s.doc.pages.find((p) => p.id === s.pageId)
     return (page?.children ?? []).filter((id) => s.doc.nodes[id]?.type === 'frame' && s.doc.nodes[id].visible).length
   })
-  const [, force] = useState(0)
+  // shader layers export their code once the shader runtime has loaded
+  const [shaderTick, setShaderTick] = useState(0)
   useEffect(() => {
-    shaderRuntimeReady.then(() => force((x) => x + 1))
+    shaderRuntimeReady.then(() => setShaderTick((x) => x + 1))
   }, [])
 
   const result = useMemo(() => {
     void deferredInputs // what this depends on; the export reads the current document
+    void shaderTick
     const doc = getEditor().doc
     if (tab === 'tokens') return { files: [{ path: 'tokens.css', contents: exportTokensCSS(doc) + '\n\n/* Tailwind v4 */\n' + exportTokensTailwind(doc), language: 'css' as const }], snippet: '', snippetLanguage: 'css' as const }
     if (!targetId || !doc.nodes[targetId]) return null
@@ -130,7 +143,7 @@ export function CodePanel() {
       return { files: [{ path: 'error.txt', contents: String((e as Error).message), language: 'css' as const }], snippet: '', snippetLanguage: 'css' as const }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [deferredInputs, targetId, tab])
+  }, [deferredInputs, targetId, tab, shaderTick])
 
   const [fileIdx, setFileIdx] = useState(0)
   useEffect(() => setFileIdx(0), [tab, targetId])

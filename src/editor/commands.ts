@@ -1,7 +1,7 @@
 import { getEditor, normalizeSelection, childrenOf } from './store'
 import { askText } from '../ui/Dialogs'
 import { zoomBy, zoomToFit } from './Canvas'
-import { cloneSubtree } from './factory'
+import { cloneSubtree, solidFill } from './factory'
 import type { KNode, Rect, Tool } from './types'
 import { measure, measureSize, unionRects } from './geometry'
 import { insertPreset, PRESETS } from './presets'
@@ -334,7 +334,19 @@ function pasteStyle() {
   if (!st || !ids.length) return
   s.setProps(ids, (n) => {
     const v = structuredClone(st)
-    n.fills = v.fills
+    // text's colour and a shape's fill are the same property across the two kinds (as in Figma)
+    if (v.text && !n.text) {
+      const f = solidFill(v.text.color)
+      if (v.text.tokenId) f.tokenId = v.text.tokenId
+      n.fills = [f]
+    } else if (!v.text && n.text) {
+      const solid = v.fills.find((f) => f.visible && f.type === 'solid')
+      if (solid) {
+        n.text.color = solid.color
+        if (solid.tokenId) n.text.tokenId = solid.tokenId
+        else delete n.text.tokenId
+      }
+    } else n.fills = v.fills
     n.stroke = v.stroke
     n.shadows = v.shadows
     n.blur = v.blur
@@ -343,7 +355,11 @@ function pasteStyle() {
     n.opacity = v.opacity
     n.blend = v.blend
     // type styles go only onto text layers, and the words stay
-    if (v.text && n.text) Object.assign(n.text, v.text)
+    if (v.text && n.text) {
+      Object.assign(n.text, v.text)
+      // a plain colour replaces a token-bound one (the token would otherwise win)
+      if (!v.text.tokenId) delete n.text.tokenId
+    }
   })
   s.notify(`Pasted properties onto ${ids.length} layer${ids.length > 1 ? 's' : ''}`)
 }
@@ -583,7 +599,8 @@ export function isTypingTarget(t: EventTarget | null) {
 export function handleKeyDown(e: KeyboardEvent) {
   const s = getEditor()
   // held Alt / Option: the overlay measures distances (cleared on key up and window blur)
-  if (e.key === 'Alt' && !s.altDown) s.set({ altDown: true })
+  // (not while typing: Option makes characters there, e.g. ⌥2 → ™)
+  if (e.key === 'Alt' && !s.altDown && !isTypingTarget(e.target)) s.set({ altDown: true })
   // no structural edits mid-drag (the drag holds references to the dragged layers)
   if (s.drag && e.key !== ' ' && e.key !== 'Shift' && e.key !== 'Alt' && e.key !== 'Meta' && e.key !== 'Control') {
     e.preventDefault()
