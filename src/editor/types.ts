@@ -163,6 +163,14 @@ export interface BaseNode {
   binding?: string
   /** free-form notes left by humans or agents */
   note?: string
+
+  /**
+   * Components (components.ts). `main` marks a main component's root. `source` is set on every
+   * layer of an instance: the id of the main's layer it mirrors (an instance root's source is a
+   * main root). Changes to a main flow into its instances, keeping what an instance overrode.
+   */
+  main?: true
+  source?: string
 }
 
 export type KNode = BaseNode

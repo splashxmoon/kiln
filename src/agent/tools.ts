@@ -10,7 +10,8 @@ import type { KDoc, KNode, Layout, NodeType, ShaderKind } from '../editor/types'
 import { createNode, createPage, createToken, solidFill, linearFill, dropShadow } from '../editor/factory'
 import { htmlToNodes } from '../editor/importHtml'
 import { snapshotNode, dataURLToBase64 } from '../editor/snapshot'
-import { measure } from '../editor/geometry'
+import { measure, measureSize } from '../editor/geometry'
+import { runReview, issuesToJSON } from '../editor/review'
 import { exportNode, nodeCSSDeclarations, type ExportTarget } from '../codegen'
 import { defaultShaderSpec, SHADER_KINDS } from '../shaders/defs'
 import { ensureFont } from '../editor/fonts'
@@ -599,6 +600,20 @@ const TOOLS: ToolDef[] = [
         .slice(0, 50)
         .map((n) => ({ id: n.id, type: n.type, name: n.name, pageId: n.pageId, text: n.text?.content.slice(0, 80) }))
       return text(hits)
+    },
+  },
+  {
+    tool: {
+      name: 'review_design',
+      description:
+        'Design review (lint) of the current page, or every page with allPages: text contrast below WCAG AA, tap targets under 44x44, colours that match a token but do not use it, default layer names, images without alt text, text overflowing a fixed box, hidden or empty frames. Returns the issues (nodeId, rule, severity, message) so you can fix them with update_nodes, apply_token or delete_nodes.',
+      inputSchema: { type: 'object', properties: { allPages: { type: 'boolean', default: false } } },
+      annotations: { readOnlyHint: true },
+    },
+    run: (a) => {
+      const s = getEditor()
+      const issues = runReview(s.doc, a.allPages ? undefined : s.pageId, { size: measureSize })
+      return text({ count: issues.length, issues: issuesToJSON(s.doc, issues) })
     },
   },
 ]

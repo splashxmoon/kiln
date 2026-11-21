@@ -598,7 +598,13 @@ pub fn load_in(root: &Path, id: &str) -> Result<Option<Value>, String> {
 }
 
 /// Writes `doc` in place if it exists anywhere, else into `project_id`'s folder (or top level).
+/// When the newest automatic version is ten minutes old (or there is none), the save is also
+/// kept as one.
 pub fn save_in(root: &Path, doc: &Value, project_id: Option<&str>) -> Result<(), String> {
+    save_in_at(root, doc, project_id, now_millis())
+}
+
+fn save_in_at(root: &Path, doc: &Value, project_id: Option<&str>, now: u64) -> Result<(), String> {
     let id = doc
         .get("id")
         .and_then(Value::as_str)
@@ -624,6 +630,8 @@ pub fn save_in(root: &Path, doc: &Value, project_id: Option<&str>) -> Result<(),
     if let Some(new) = stamp {
         saved.insert(key, new);
     }
+    // still under the lock, so two saves can't both decide a snapshot is due
+    auto_version(root, id, doc, &bytes, now);
     Ok(())
 }
 
@@ -804,16 +812,282 @@ pub fn purge_trash_in(root: &Path, trash_id: Option<&str>) -> Result<(), String>
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("cannot remove {}: {e}", p.display())),
         _ => Ok(()),
     };
+    // a file's versions go with it once nothing by that id is left, in the files or the trash
     match trash_id {
         Some(tid) => {
             check_id(tid)?;
+            let file_id = trashed_file_id(&trash, tid);
             let kiln = file_path(&trash, tid);
             let side = trash.join(format!("{tid}.json"));
             ignore_missing(fs::remove_file(&kiln), &kiln)?;
-            ignore_missing(fs::remove_file(&side), &side)
+            ignore_missing(fs::remove_file(&side), &side)?;
+            if let Some(id) = file_id {
+                drop_orphan_versions(root, &id);
+            }
+            Ok(())
         }
-        None => ignore_missing(fs::remove_dir_all(&trash), &trash),
+        None => {
+            let ids: HashSet<String> = kiln_files(&trash).into_iter().filter_map(|(stem, _)| trashed_file_id(&trash, &stem)).collect();
+            ignore_missing(fs::remove_dir_all(&trash), &trash)?;
+            for id in ids {
+                drop_orphan_versions(root, &id);
+            }
+            Ok(())
+        }
     }
+}
+
+/// The id of the file a trash entry holds: from its sidecar, else from the entry's name.
+fn trashed_file_id(trash: &Path, stem: &str) -> Option<String> {
+    let id = read_sidecar(&trash.join(format!("{stem}.json")))
+        .and_then(|s| s.id)
+        .unwrap_or_else(|| split_trash_stem(stem).0.to_string());
+    is_valid_id(&id).then_some(id)
+}
+
+/// Removes a file's versions when no file and no trash entry by that id is left.
+fn drop_orphan_versions(root: &Path, file_id: &str) {
+    if !is_valid_id(file_id) || resolve(root, file_id).is_some() {
+        return;
+    }
+    let trash = trash_dir(root);
+    if kiln_files(&trash).iter().any(|(stem, _)| trashed_file_id(&trash, stem).as_deref() == Some(file_id)) {
+        return;
+    }
+    let dir = versions_dir(root, file_id);
+    if let Err(e) = fs::remove_dir_all(&dir) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            eprintln!("[kiln] cannot remove versions of {file_id}: {e}");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Versions: `<root>/.versions/<fileId>/<versionId>.kiln`, each with a `<versionId>.json` holding
+// its meta, so listing never reads whole documents. A version id is `a<ms>-<n>` (automatic) or
+// `n<ms>-<n>` (named), so the newest automatic one is found from file names alone.
+// ---------------------------------------------------------------------------
+
+const VERSIONS: &str = ".versions";
+/// A save is also kept as a version when the newest automatic one is at least this old.
+const AUTO_EVERY_MS: u64 = 10 * 60 * 1000;
+/// Automatic versions kept: the newest this many, plus the newest of each of the last KEEP_DAYS days.
+const KEEP_RECENT: usize = 30;
+const KEEP_DAYS: u64 = 30;
+const DAY_MS: u64 = 86_400_000;
+const MAX_VERSION_NAME: usize = 120;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionMeta {
+    pub version_id: String,
+    pub file_id: String,
+    /// None for an automatic (timed) version.
+    pub name: Option<String>,
+    pub created_at: u64,
+    /// bytes on disk
+    pub size: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail: Option<String>,
+}
+
+fn versions_dir(root: &Path, file_id: &str) -> PathBuf {
+    root.join(VERSIONS).join(file_id)
+}
+
+fn new_version_id(named: bool, created_at: u64) -> String {
+    let c = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{}{created_at}-{}", if named { 'n' } else { 'a' }, base36(c as u128))
+}
+
+/// `a1700000000000-3` -> Some((true, 1700000000000)): whether it is automatic, and when it was made.
+fn parse_version_id(id: &str) -> Option<(bool, u64)> {
+    let auto = match id.as_bytes().first()? {
+        b'a' => true,
+        b'n' => false,
+        _ => return None,
+    };
+    let (ms, _) = id[1..].split_once('-')?;
+    Some((auto, ms.parse().ok()?))
+}
+
+fn check_version_id(id: &str) -> Result<(), String> {
+    check_id(id)?;
+    parse_version_id(id).map(|_| ()).ok_or_else(|| format!("invalid version id {id:?}"))
+}
+
+/// Automatic versions of a file as (version id, created at), from file names only.
+fn auto_versions(root: &Path, file_id: &str) -> Vec<(String, u64)> {
+    kiln_files(&versions_dir(root, file_id))
+        .into_iter()
+        .filter_map(|(stem, _)| match parse_version_id(&stem) {
+            Some((true, at)) => Some((stem, at)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The automatic versions to drop: every one except the newest `keep_recent` and the newest of
+/// each day (UTC) within the last `keep_days` days.
+pub fn autos_to_prune(autos: &[(String, u64)], now: u64, keep_recent: usize, keep_days: u64) -> Vec<String> {
+    let mut sorted: Vec<&(String, u64)> = autos.iter().collect();
+    sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+    let mut days = HashSet::new();
+    let mut out = Vec::new();
+    for (i, (id, at)) in sorted.into_iter().enumerate() {
+        let day_keeper = now.saturating_sub(*at) < keep_days * DAY_MS && days.insert(at / DAY_MS);
+        if i >= keep_recent && !day_keeper {
+            out.push(id.clone());
+        }
+    }
+    out
+}
+
+fn remove_version_files(dir: &Path, version_id: &str) -> Result<(), String> {
+    for p in [file_path(dir, version_id), dir.join(format!("{version_id}.json"))] {
+        if let Err(e) = fs::remove_file(&p) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(format!("cannot remove {}: {e}", p.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn prune_versions(root: &Path, file_id: &str, now: u64) {
+    let dir = versions_dir(root, file_id);
+    for id in autos_to_prune(&auto_versions(root, file_id), now, KEEP_RECENT, KEEP_DAYS) {
+        if let Err(e) = remove_version_files(&dir, &id) {
+            eprintln!("[kiln] cannot prune version: {e}");
+        }
+    }
+}
+
+/// Writes the document bytes, then the meta (both atomically); a version without its meta is
+/// still listed, so a crash between the two loses nothing.
+fn write_version(
+    root: &Path,
+    file_id: &str,
+    bytes: &[u8],
+    thumbnail: Option<String>,
+    name: Option<String>,
+    created_at: u64,
+) -> Result<VersionMeta, String> {
+    let dir = versions_dir(root, file_id);
+    fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    let meta = VersionMeta {
+        version_id: new_version_id(name.is_some(), created_at),
+        file_id: file_id.to_string(),
+        name,
+        created_at,
+        size: bytes.len() as u64,
+        thumbnail,
+    };
+    atomic_write(&file_path(&dir, &meta.version_id), bytes)?;
+    write_json(&dir.join(format!("{}.json", meta.version_id)), &meta)?;
+    Ok(meta)
+}
+
+/// The timed snapshot taken on save. Never fails the save: a problem is only logged.
+fn auto_version(root: &Path, file_id: &str, doc: &Value, bytes: &[u8], now: u64) {
+    let newest = auto_versions(root, file_id).into_iter().map(|(_, at)| at).max();
+    if newest.is_some_and(|at| now.saturating_sub(at) < AUTO_EVERY_MS) {
+        return;
+    }
+    let thumbnail = meta_from_value(doc, file_id).thumbnail;
+    match write_version(root, file_id, bytes, thumbnail, None, now) {
+        Ok(_) => prune_versions(root, file_id, now),
+        Err(e) => eprintln!("[kiln] cannot keep an automatic version of {file_id}: {e}"),
+    }
+}
+
+/// A file's versions, newest first.
+pub fn list_versions_in(root: &Path, file_id: &str) -> Result<Vec<VersionMeta>, String> {
+    check_id(file_id)?;
+    let dir = versions_dir(root, file_id);
+    let mut out = Vec::new();
+    for (stem, path) in kiln_files(&dir) {
+        let Some((auto, created_at)) = parse_version_id(&stem) else { continue };
+        let side: Option<VersionMeta> = fs::read(dir.join(format!("{stem}.json"))).ok().and_then(|b| serde_json::from_slice(&b).ok());
+        let meta = side.filter(|m| m.version_id == stem).unwrap_or_else(|| VersionMeta {
+            version_id: stem.clone(),
+            file_id: file_id.to_string(),
+            name: (!auto).then(|| "Untitled version".to_string()),
+            created_at,
+            size: fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
+            thumbnail: None,
+        });
+        out.push(VersionMeta { file_id: file_id.to_string(), ..meta });
+    }
+    out.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| b.version_id.cmp(&a.version_id)));
+    Ok(out)
+}
+
+/// Keeps `doc` (without one, the file as saved) as a version of `file_id`. A name makes it a named
+/// version, kept until deleted; without one (or a blank one) it is automatic and may be pruned.
+pub fn save_version_in(root: &Path, file_id: &str, name: Option<&str>, doc: Option<&Value>) -> Result<VersionMeta, String> {
+    save_version_at(root, file_id, name, doc, now_millis())
+}
+
+fn save_version_at(root: &Path, file_id: &str, name: Option<&str>, doc: Option<&Value>, now: u64) -> Result<VersionMeta, String> {
+    check_id(file_id)?;
+    let loaded;
+    let doc = match doc {
+        Some(d) => d,
+        None => {
+            loaded = load_in(root, file_id)?.ok_or_else(|| format!("file {file_id:?} not found"))?;
+            &loaded
+        }
+    };
+    if doc.get("id").and_then(Value::as_str) != Some(file_id) {
+        return Err("the document's id doesn't match the file".into());
+    }
+    let name = name.map(str::trim).filter(|n| !n.is_empty()).map(|n| n.chars().take(MAX_VERSION_NAME).collect::<String>());
+    let auto = name.is_none();
+    let bytes = serde_json::to_vec(doc).map_err(|e| e.to_string())?;
+    let meta = write_version(root, file_id, &bytes, meta_from_value(doc, file_id).thumbnail, name, now)?;
+    if auto {
+        prune_versions(root, file_id, now);
+    }
+    Ok(meta)
+}
+
+pub fn load_version_in(root: &Path, file_id: &str, version_id: &str) -> Result<Option<Value>, String> {
+    check_id(file_id)?;
+    check_version_id(version_id)?;
+    let path = file_path(&versions_dir(root, file_id), version_id);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    read_json(&path).map(Some)
+}
+
+pub fn delete_version_in(root: &Path, file_id: &str, version_id: &str) -> Result<(), String> {
+    check_id(file_id)?;
+    check_version_id(version_id)?;
+    let dir = versions_dir(root, file_id);
+    remove_version_files(&dir, version_id)?;
+    let _ = fs::remove_dir(&dir); // only goes when empty
+    Ok(())
+}
+
+/// Writes a version back as the file (keeping the file's id) and returns it. The file as it was
+/// becomes an automatic version first, so a restore can itself be taken back.
+pub fn restore_version_in(root: &Path, file_id: &str, version_id: &str) -> Result<Value, String> {
+    let mut doc = load_version_in(root, file_id, version_id)?.ok_or("that version no longer exists")?;
+    if !doc.is_object() {
+        return Err(format!("version {version_id:?} is not a document"));
+    }
+    let now = now_millis();
+    if resolve(root, file_id).is_some() {
+        save_version_at(root, file_id, None, None, now)?;
+    }
+    // newer than anything saved, so an older save still in flight doesn't land over it
+    let last = saved().get(&(root.to_path_buf(), file_id.to_string())).copied().unwrap_or(0.0);
+    doc["id"] = Value::String(file_id.to_string());
+    doc["updatedAt"] = Value::from((now as f64).max(last.floor() + 1.0) as u64);
+    save_in_at(root, &doc, None, now)?;
+    Ok(doc)
 }
 
 // ---------------------------------------------------------------------------
@@ -1096,6 +1370,43 @@ pub async fn restore_trash<R: Runtime>(app: AppHandle<R>, trash_id: String) -> R
 pub async fn purge_trash<R: Runtime>(app: AppHandle<R>, trash_id: Option<String>) -> Result<(), String> {
     let dir = files_dir(&app)?;
     blocking(move || purge_trash_in(&dir, trash_id.as_deref())).await
+}
+
+#[tauri::command]
+pub async fn list_versions<R: Runtime>(app: AppHandle<R>, file_id: String) -> Result<Vec<VersionMeta>, String> {
+    let dir = files_dir(&app)?;
+    blocking(move || list_versions_in(&dir, &file_id)).await
+}
+
+/// `doc` is the open document (newer than the saved file while an autosave is pending); without
+/// it the file as saved is kept. A null name makes an automatic version.
+#[tauri::command]
+pub async fn save_version<R: Runtime>(
+    app: AppHandle<R>,
+    file_id: String,
+    name: Option<String>,
+    doc: Option<Value>,
+) -> Result<VersionMeta, String> {
+    let dir = files_dir(&app)?;
+    blocking(move || save_version_in(&dir, &file_id, name.as_deref(), doc.as_ref())).await
+}
+
+#[tauri::command]
+pub async fn load_version<R: Runtime>(app: AppHandle<R>, file_id: String, version_id: String) -> Result<Option<Value>, String> {
+    let dir = files_dir(&app)?;
+    blocking(move || load_version_in(&dir, &file_id, &version_id)).await
+}
+
+#[tauri::command]
+pub async fn delete_version<R: Runtime>(app: AppHandle<R>, file_id: String, version_id: String) -> Result<(), String> {
+    let dir = files_dir(&app)?;
+    blocking(move || delete_version_in(&dir, &file_id, &version_id)).await
+}
+
+#[tauri::command]
+pub async fn restore_version<R: Runtime>(app: AppHandle<R>, file_id: String, version_id: String) -> Result<Value, String> {
+    let dir = files_dir(&app)?;
+    blocking(move || restore_version_in(&dir, &file_id, &version_id)).await
 }
 
 #[tauri::command]
@@ -1637,6 +1948,181 @@ mod tests {
         assert!(list_projects_in(&root).unwrap().is_empty());
         assert!(root.join("n1.kiln").is_file());
 
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    const MIN: u64 = 60_000;
+    const T0: u64 = 1_700_000_000_000;
+
+    fn names(list: &[VersionMeta]) -> Vec<Option<&str>> {
+        list.iter().map(|v| v.name.as_deref()).collect()
+    }
+
+    #[test]
+    fn versions_save_list_load_delete() {
+        let root = temp_root();
+        // the first save of a file is kept as an automatic version
+        save_in_at(&root, &doc("f", "First", 1), None, T0).unwrap();
+        let list = list_versions_in(&root, "f").unwrap();
+        assert_eq!(names(&list), [None]);
+        assert_eq!(list[0].file_id, "f");
+        assert_eq!(list[0].created_at, T0);
+        assert!(list[0].size > 0);
+
+        // named: the open document when given, else the file as saved; newest first
+        let mut open = doc("f", "Open, unsaved", 2);
+        open["thumbnail"] = json!("data:image/png;base64,AAAA");
+        let named = save_version_at(&root, "f", Some("  Before the redesign  "), Some(&open), T0 + MIN).unwrap();
+        assert_eq!(named.name.as_deref(), Some("Before the redesign"));
+        assert_eq!(named.thumbnail.as_deref(), Some("data:image/png;base64,AAAA"));
+        let from_disk = save_version_at(&root, "f", Some("Saved"), None, T0 + 2 * MIN).unwrap();
+        assert_eq!(names(&list_versions_in(&root, "f").unwrap()), [Some("Saved"), Some("Before the redesign"), None]);
+        assert_eq!(load_version_in(&root, "f", &named.version_id).unwrap().unwrap()["name"], "Open, unsaved");
+        assert_eq!(load_version_in(&root, "f", &from_disk.version_id).unwrap().unwrap()["name"], "First");
+        // a blank name is an automatic version
+        assert_eq!(save_version_at(&root, "f", Some("  "), None, T0 + 3 * MIN).unwrap().name, None);
+
+        // a version listed without its meta file is still there
+        fs::remove_file(versions_dir(&root, "f").join(format!("{}.json", named.version_id))).unwrap();
+        let again = list_versions_in(&root, "f").unwrap();
+        let bare = again.iter().find(|v| v.version_id == named.version_id).unwrap();
+        assert_eq!((bare.name.as_deref(), bare.created_at), (Some("Untitled version"), T0 + MIN));
+
+        delete_version_in(&root, "f", &named.version_id).unwrap();
+        delete_version_in(&root, "f", &named.version_id).unwrap(); // already gone: fine
+        assert_eq!(list_versions_in(&root, "f").unwrap().len(), 3);
+        assert_eq!(load_version_in(&root, "f", &named.version_id).unwrap(), None);
+
+        // bad input
+        assert!(save_version_at(&root, "f", Some("x"), Some(&doc("other", "O", 1)), T0).is_err());
+        assert!(save_version_in(&root, "missing", Some("x"), None).is_err());
+        for bad in ["../f", "a/b", ""] {
+            assert!(list_versions_in(&root, bad).is_err());
+            assert!(load_version_in(&root, "f", bad).is_err());
+            assert!(delete_version_in(&root, bad, &from_disk.version_id).is_err());
+        }
+        assert!(load_version_in(&root, "f", "x123-1").is_err()); // not a version id
+        assert!(list_versions_in(&root, "never-saved").unwrap().is_empty());
+        // versions never show up as files or projects
+        assert_eq!(ids(&list_in(&root).unwrap()), ["f"]);
+        assert!(list_projects_in(&root).unwrap().is_empty());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn timed_snapshots_every_ten_minutes() {
+        let root = temp_root();
+        save_in_at(&root, &doc("t", "T", 1), None, T0).unwrap();
+        save_in_at(&root, &doc("t", "T", 2), None, T0 + 5 * MIN).unwrap();
+        save_in_at(&root, &doc("t", "T", 3), None, T0 + 9 * MIN).unwrap();
+        assert_eq!(list_versions_in(&root, "t").unwrap().len(), 1);
+        save_in_at(&root, &doc("t", "T", 4), None, T0 + 10 * MIN).unwrap();
+        let list = list_versions_in(&root, "t").unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(load_version_in(&root, "t", &list[0].version_id).unwrap().unwrap()["updatedAt"], 4);
+        // a named version doesn't reset the clock
+        save_version_at(&root, "t", Some("Named"), None, T0 + 15 * MIN).unwrap();
+        save_in_at(&root, &doc("t", "T", 5), None, T0 + 20 * MIN).unwrap();
+        assert_eq!(list_versions_in(&root, "t").unwrap().iter().filter(|v| v.name.is_none()).count(), 3);
+        // a save that lost the race to a newer one keeps no version either
+        save_in_at(&root, &doc("t", "T", 1), None, T0 + 60 * MIN).unwrap();
+        assert_eq!(list_versions_in(&root, "t").unwrap().len(), 4);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn pruning_keeps_recent_autos_one_per_day_and_every_named() {
+        let hour = 60 * MIN;
+        let now = T0 - T0 % DAY_MS + 23 * hour; // late in a day, so "today" holds 24 hourly autos
+        // pure rule: 3 recent, then the newest of each day within 2 days
+        let autos: Vec<(String, u64)> = (0..72).map(|h| (format!("a{h}"), now - h * hour)).collect();
+        let drop = autos_to_prune(&autos, now, 3, 2);
+        let kept: Vec<&str> = autos.iter().map(|(id, _)| id.as_str()).filter(|id| !drop.iter().any(|d| d == id)).collect();
+        // a0..a2 recent; a0 is also today's keeper; yesterday's newest is a24; the day before is out of the window
+        assert_eq!(kept, ["a0", "a1", "a2", "a24"]);
+
+        // on disk: 50 days of autos, 4 a day, and named versions as old as the oldest
+        let root = temp_root();
+        save_in_at(&root, &doc("p", "P", 1), None, now).unwrap();
+        for d in 0..50u64 {
+            for q in 0..4u64 {
+                save_version_at(&root, "p", None, None, now - d * DAY_MS - q * 6 * hour - 1).unwrap();
+            }
+        }
+        save_version_at(&root, "p", Some("Old but named"), None, now - 49 * DAY_MS).unwrap();
+        // each save above pruned as of its own time; now prune as of today
+        prune_versions(&root, "p", now);
+        let list = list_versions_in(&root, "p").unwrap();
+        let autos: Vec<&VersionMeta> = list.iter().filter(|v| v.name.is_none()).collect();
+        // 30 newest (the save plus 29 more, covering days 0..7), plus one for each of days 8..29
+        assert_eq!(autos.len(), 30 + 22);
+        assert!(autos.iter().all(|v| now - v.created_at < KEEP_DAYS * DAY_MS));
+        assert!(list.iter().any(|v| v.name.as_deref() == Some("Old but named")));
+        // every pruned version is gone from disk too, meta and all
+        let files = fs::read_dir(versions_dir(&root, "p")).unwrap().count();
+        assert_eq!(files, 2 * list.len());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn restore_version_keeps_the_file_and_its_id() {
+        let root = temp_root();
+        let p = create_project_in(&root, "Work", None).unwrap();
+        save_in_at(&root, &doc("r", "Draft one", 100), Some(&p.id), T0).unwrap();
+        let v1 = save_version_at(&root, "r", Some("One"), None, T0 + MIN).unwrap();
+        save_in_at(&root, &doc("r", "Draft two", 200), None, T0 + 2 * MIN).unwrap();
+
+        let restored = restore_version_in(&root, "r", &v1.version_id).unwrap();
+        assert_eq!(restored["name"], "Draft one");
+        assert_eq!(restored["id"], "r");
+        let on_disk = load_in(&root, "r").unwrap().unwrap();
+        assert_eq!(on_disk["name"], "Draft one");
+        assert!(on_disk["updatedAt"].as_u64().unwrap() > 200);
+        // still in its project, and what it replaced was kept as an automatic version
+        assert!(root.join("Work").join("r.kiln").is_file());
+        let list = list_versions_in(&root, "r").unwrap();
+        let before = list.iter().find(|v| v.name.is_none() && v.created_at > T0 + MIN).unwrap();
+        assert_eq!(load_version_in(&root, "r", &before.version_id).unwrap().unwrap()["name"], "Draft two");
+        // an older autosave still in flight doesn't overwrite the restore
+        save_in(&root, &doc("r", "Draft two", 200), None).unwrap();
+        assert_eq!(load_in(&root, "r").unwrap().unwrap()["name"], "Draft one");
+
+        assert!(restore_version_in(&root, "r", "n1-1").is_err());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn trash_keeps_versions_and_purge_removes_them() {
+        let root = temp_root();
+        for id in ["k", "g"] {
+            save_in(&root, &doc(id, id, 1), None).unwrap();
+            save_version_in(&root, id, Some("Named"), None).unwrap();
+        }
+        delete_in(&root, "k").unwrap();
+        delete_in(&root, "g").unwrap();
+        assert_eq!(list_versions_in(&root, "k").unwrap().len(), 2);
+        let trash = list_trash_in(&root).unwrap();
+        let k = trash.iter().find(|t| t.id == "k").unwrap().trash_id.clone();
+        // restored and deleted again: purging one of two "k" entries keeps the versions
+        restore_trash_in(&root, &k).unwrap();
+        delete_in(&root, "k").unwrap();
+        save_in(&root, &doc("k", "k again", 2), None).unwrap();
+        delete_in(&root, "k").unwrap();
+        let ks: Vec<String> = list_trash_in(&root).unwrap().into_iter().filter(|t| t.id == "k").map(|t| t.trash_id).collect();
+        assert_eq!(ks.len(), 2);
+        purge_trash_in(&root, Some(&ks[0])).unwrap();
+        assert!(!list_versions_in(&root, "k").unwrap().is_empty());
+        purge_trash_in(&root, Some(&ks[1])).unwrap();
+        assert!(list_versions_in(&root, "k").unwrap().is_empty());
+        assert!(!versions_dir(&root, "k").exists());
+
+        // a live file by the same id keeps them through purge-all
+        save_in(&root, &doc("g", "g is back", 3), None).unwrap();
+        purge_trash_in(&root, None).unwrap();
+        assert!(!list_versions_in(&root, "g").unwrap().is_empty());
+        delete_in(&root, "g").unwrap();
+        purge_trash_in(&root, None).unwrap();
+        assert!(list_versions_in(&root, "g").unwrap().is_empty());
         fs::remove_dir_all(&root).unwrap();
     }
 }

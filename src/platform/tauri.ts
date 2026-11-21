@@ -134,6 +134,31 @@ export const desktopRestoreTrash = (trashId: string): Promise<void> => invoke('r
 /** Deletes one trash entry for good, or all of them when trashId is null. */
 export const desktopPurgeTrash = (trashId: string | null = null): Promise<void> => invoke('purge_trash', { trashId })
 
+// ---- versions (<Documents>/Kiln/.versions/<fileId>) -------------------------
+
+export interface DesktopVersionMeta {
+  versionId: string
+  fileId: string
+  /** null for an automatic (timed) version */
+  name: string | null
+  createdAt: number
+  size: number
+  thumbnail?: string | null
+}
+
+export const desktopListVersions = (fileId: string): Promise<DesktopVersionMeta[]> => invoke('list_versions', { fileId })
+
+/** Keeps `doc` (or the file as saved, without one) as a version; a null name makes an automatic one. */
+export const desktopSaveVersion = (fileId: string, name: string | null, doc: unknown = null): Promise<DesktopVersionMeta> =>
+  invoke('save_version', { fileId, name, doc })
+
+export const desktopLoadVersion = (fileId: string, versionId: string): Promise<unknown | null> => invoke('load_version', { fileId, versionId })
+
+export const desktopDeleteVersion = (fileId: string, versionId: string): Promise<void> => invoke('delete_version', { fileId, versionId })
+
+/** Writes the version back as the file (the file as it was becomes a version first); resolves to it. */
+export const desktopRestoreVersion = (fileId: string, versionId: string): Promise<unknown> => invoke('restore_version', { fileId, versionId })
+
 export const desktopRevealFolder = (): Promise<void> => invoke('reveal_files_folder')
 
 /** Asks for a folder and writes the files into it. Resolves to the folder path, or null if cancelled. */

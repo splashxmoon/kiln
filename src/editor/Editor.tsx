@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
-import { Palette, Code2, Bot } from 'lucide-react'
+import { Palette, Code2, Bot, ListChecks } from 'lucide-react'
 import { useEditor, getEditor } from './store'
 import { Canvas, zoomToFit } from './Canvas'
 import { LeftPanel, LeftPanelCollapsed } from './panels/LayersPanel'
 import { Inspector } from './panels/Inspector'
 import { CodePanel } from './panels/CodePanel'
 import { AgentPanel } from './panels/AgentPanel'
+import { ReviewPanel } from './panels/ReviewPanel'
 import { Toolbar } from './panels/Toolbar'
 import { TopBar } from './panels/TopBar'
 import { CommandPalette, ContextMenu, ShortcutsSheet, Toast } from './panels/Menus'
@@ -324,6 +325,7 @@ export function Editor({ fileId, onBack }: { fileId: string; onBack: () => void 
                 ['design', 'Design', Palette],
                 ['code', 'Code', Code2],
                 ['agent', 'Agent', Bot],
+                ['review', 'Review', ListChecks],
               ] as const
             ).map(([id, label, Icon]) => (
               <button key={id} className={rightTab === id ? 'is-on' : ''} onClick={() => getEditor().set({ rightTab: id })}>
@@ -335,6 +337,7 @@ export function Editor({ fileId, onBack }: { fileId: string; onBack: () => void 
             {rightTab === 'design' && <Inspector />}
             {rightTab === 'code' && <CodePanel />}
             {rightTab === 'agent' && <AgentPanel key={loadedId} />}
+            {rightTab === 'review' && <ReviewPanel />}
           </div>
         </aside>
       </div>

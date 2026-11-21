@@ -5,6 +5,7 @@ import { Search, X } from 'lucide-react'
 import { useEditor, getEditor } from '../store'
 import { COMMANDS, runCommand, batchNames, applyBatchRename, type RenameRule } from '../commands'
 import { shortcut } from '../../platform/keys'
+import { VersionsHost } from './VersionsDialog'
 
 /* ------------------------------------------------------------------ palette */
 
@@ -20,12 +21,16 @@ function score(q: string, label: string) {
   return i === b.length ? 1 : 0
 }
 
-/** Editor mounts this; the batch rename dialog rides along with it (it is opened by `edit.rename`). */
+/**
+ * Editor mounts this; the batch rename dialog (opened by `edit.rename`) and version history
+ * (`file.versions`) ride along with it.
+ */
 export function CommandPalette() {
   return (
     <>
       <Palette />
       <BatchRename />
+      <VersionsHost />
     </>
   )
 }
@@ -111,6 +116,13 @@ const CTX: (string | '-')[] = [
   'edit.duplicate',
   'edit.delete',
   '-',
+  // component items show only when they apply (see below)
+  'component.create',
+  'component.insertInstance',
+  'component.goToMain',
+  'component.reset',
+  'component.detach',
+  '-',
   'edit.copyStyle',
   'edit.pasteStyle',
   '-',
@@ -141,7 +153,11 @@ export function ContextMenu() {
   const menu = useEditor((s) => s.contextMenu)
   const hasSel = useEditor((s) => s.selection.length > 0)
   if (!menu) return null
-  const items = hasSel ? CTX : ['view.fit', 'edit.selectAll', '-', 'page.add', 'insert.desktop', 'insert.mobile']
+  const all = hasSel ? CTX : ['view.fit', 'edit.selectAll', '-', 'page.add', 'insert.desktop', 'insert.mobile', '-', 'file.saveVersion', 'file.versions']
+  // component items only when they apply, and no doubled separator where they were
+  const items = all
+    .filter((id) => !id.startsWith('component.') || COMMANDS.find((c) => c.id === id)?.enabled?.() !== false)
+    .filter((id, i, a) => !(id === '-' && a[i - 1] === '-'))
   return (
     <div className="k-modal-backdrop is-clear" onPointerDown={() => getEditor().set({ contextMenu: null })} onContextMenu={(e) => e.preventDefault()}>
       <div

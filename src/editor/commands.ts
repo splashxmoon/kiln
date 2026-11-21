@@ -12,6 +12,7 @@ import { viewportCenterWorld } from './Canvas'
 import { snapshotNode, downloadDataURL } from './snapshot'
 import { isMac } from '../platform/os'
 import { shortcut } from '../platform/keys'
+import { cannotMakeComponent, createInstance, detach, instanceRootOf, mainOf, mainRootOf, makeComponent, relinkPasted, resetOverrides } from './components'
 
 export interface Command {
   id: string
@@ -47,7 +48,9 @@ const hasFrameSel = () => getEditor().selection.some((id) => getEditor().doc.nod
 /* ------------------------------------------------------------------ clipboard */
 
 const MARK = 'kiln/clipboard:'
-let memoryClipboard: { nodes: KNode[]; roots: string[]; sources?: string[] } | null = null
+/** `mains`: the clipboard layers copied from a main component root. */
+type ClipPayload = { nodes: KNode[]; roots: string[]; sources?: string[]; mains?: string[] }
+let memoryClipboard: ClipPayload | null = null
 
 export async function copySelection(cut = false) {
   const s = getEditor()
@@ -55,8 +58,9 @@ export async function copySelection(cut = false) {
   if (!ids.length) return
   const nodes: KNode[] = []
   const roots: string[] = []
+  const origin = new Map<string, string>()
   for (const id of ids) {
-    const [root, all] = cloneSubtree(s.doc.nodes, id, null, s.pageId)
+    const [root, all] = cloneSubtree(s.doc.nodes, id, null, s.pageId, origin)
     const r = measure(id)
     if (r) {
       root.x = Math.round(r.x)
@@ -76,7 +80,8 @@ export async function copySelection(cut = false) {
     nodes.push(...all)
     roots.push(root.id)
   }
-  memoryClipboard = { nodes, roots, sources: ids }
+  const mains = [...origin].filter(([, from]) => s.doc.nodes[from]?.main).map(([copy]) => copy)
+  memoryClipboard = { nodes, roots, sources: ids, mains }
   try {
     await navigator.clipboard.writeText(MARK + JSON.stringify(memoryClipboard))
   } catch {
@@ -86,21 +91,28 @@ export async function copySelection(cut = false) {
   s.notify(`${cut ? 'Cut' : 'Copied'} ${ids.length} layer${ids.length > 1 ? 's' : ''}`)
 }
 
-function pasteNodes(payload: { nodes: KNode[]; roots: string[]; sources?: string[] }) {
+function pasteNodes(payload: ClipPayload) {
   const s = getEditor()
   // fresh ids each paste
   const map: Record<string, KNode> = Object.fromEntries(payload.nodes.map((n) => [n.id, n]))
   const nodes: KNode[] = []
   const roots: string[] = []
+  const origin = new Map<string, string>()
   for (const r of payload.roots) {
-    const [root, all] = cloneSubtree(map, r, null, s.pageId)
+    const [root, all] = cloneSubtree(map, r, null, s.pageId, origin)
     nodes.push(...all)
     roots.push(root.id)
   }
+  // a cut main (or one from another file) comes back as the main; other broken links are dropped
+  const mains = new Set(payload.mains ?? [])
+  relinkPasted(s.doc, nodes, (id) => mains.has(origin.get(id) ?? ''))
   const target = s.selection.length === 1 ? s.doc.nodes[s.selection[0]] : null
   // pasting while the copied layer itself is selected → paste next to it, not inside it
   const isSource = !!target && !!payload.sources?.includes(target.id)
-  const parentId = target?.type === 'frame' && !isSource ? target.id : target?.parentId ?? null
+  // an instance never goes inside its own main (⌘V twice after pasting a main): it goes beside the main
+  const home = target ? mainRootOf(s.doc, target.id) : undefined
+  const ownMain = !!home && nodes.some((n) => n.source === home.id)
+  const parentId = ownMain ? home!.parentId : target?.type === 'frame' && !isSource ? target.id : target?.parentId ?? null
   if (parentId) {
     for (const id of roots) {
       const n = nodes.find((x) => x.id === id)!
@@ -485,6 +497,40 @@ export function applyBatchRename(ids: readonly string[], rule: RenameRule) {
 
 const tool = (t: Tool) => () => getEditor().setTool(t)
 
+/* ------------------------------------------------------------------ components (components.ts) */
+
+const oneSel = () => (getEditor().selection.length === 1 ? getEditor().selection[0] : null)
+const selInstance = () => {
+  const id = oneSel()
+  return id ? instanceRootOf(getEditor().doc, id) : undefined
+}
+
+/** Insert an instance of a main: beside the main when it is a top-level layer on this page, else at the middle of the view. */
+export function insertInstance(mainId: string) {
+  const s = getEditor()
+  const m = s.doc.nodes[mainId]
+  if (!m?.main) return
+  const r = m.pageId === s.pageId ? measure(mainId) : null
+  let at: { x: number; y: number }
+  if (r && !m.parentId) at = { x: r.x + r.w + 40, y: r.y }
+  else {
+    const c = viewportCenterWorld()
+    const sz = measureSize(mainId) ?? { w: m.width, h: m.height }
+    at = { x: c.x - sz.w / 2, y: c.y - sz.h / 2 }
+  }
+  if (createInstance(mainId, { pageId: s.pageId, ...at })) s.notify(`Inserted ${m.name}`)
+}
+
+/** Select a main component (switching page if needed) and bring it into view. */
+export function goToMain(mainId: string) {
+  const s = getEditor()
+  const m = s.doc.nodes[mainId]
+  if (!m) return
+  if (m.pageId !== s.pageId) s.setPage(m.pageId)
+  s.select([mainId])
+  requestAnimationFrame(() => zoomToFit([mainId]))
+}
+
 export const COMMANDS: Command[] = [
   { id: 'tool.move', label: 'Move tool', group: 'Tools', keys: 'V', run: tool('move') },
   { id: 'tool.hand', label: 'Hand tool', group: 'Tools', keys: 'H', run: tool('hand') },
@@ -571,6 +617,7 @@ export const COMMANDS: Command[] = [
   { id: 'view.code', label: 'Show code', group: 'View', keys: shortcut('⌥C'), run: () => getEditor().set({ rightTab: 'code' }) },
   { id: 'view.agent', label: 'Open agent', group: 'View', keys: shortcut('⌘J'), run: () => getEditor().set({ rightTab: 'agent' }) },
   { id: 'view.design', label: 'Show design panel', group: 'View', run: () => getEditor().set({ rightTab: 'design' }) },
+  { id: 'view.review', label: 'Review design', group: 'View', run: () => getEditor().set({ rightTab: 'review' }) },
   { id: 'view.shortcuts', label: 'Keyboard shortcuts', group: 'View', keys: '?', run: () => getEditor().set({ shortcutsOpen: true }) },
 
   { id: 'export.png', label: 'Export as PNG', group: 'Export', keys: shortcut('⇧⌘E'), enabled: hasSel, run: async () => {
@@ -580,6 +627,14 @@ export const COMMANDS: Command[] = [
     if (url) downloadDataURL(url, `${s.doc.nodes[id].name.replace(/[^\w-]+/g, '-')}@2x.png`)
   } },
   { id: 'page.add', label: 'New page', group: 'Pages', run: () => getEditor().addPage() },
+  { id: 'component.create', label: 'Create component', group: 'Components', keys: shortcut('⌥⌘K'), enabled: () => { const id = oneSel(); return !!id && !cannotMakeComponent(getEditor().doc, id) }, run: () => { const id = oneSel(); if (id && makeComponent(id)) getEditor().notify('Created a component') } },
+  { id: 'component.goToMain', label: 'Go to main component', group: 'Components', enabled: () => !!selInstance(), run: () => { const m = mainOf(getEditor().doc, oneSel()!); if (m) goToMain(m.id) } },
+  { id: 'component.reset', label: 'Reset overrides', group: 'Components', enabled: () => !!getEditor().doc.nodes[oneSel() ?? '']?.source && !!selInstance(), run: () => { if (resetOverrides(oneSel()!)) getEditor().notify('Reset to the main component') } },
+  { id: 'component.detach', label: 'Detach instance', group: 'Components', keys: shortcut('⌥⌘B'), enabled: () => !!selInstance(), run: () => { if (detach(oneSel()!)) getEditor().notify('Detached the instance') } },
+  { id: 'component.insertInstance', label: 'Insert instance', group: 'Components', enabled: () => !!getEditor().doc.nodes[oneSel() ?? '']?.main, run: () => insertInstance(oneSel()!) },
+  // VersionsDialog.tsx (mounted by Menus.tsx) answers these
+  { id: 'file.saveVersion', label: 'Name this version', group: 'File', keys: shortcut('⌥⌘S'), run: () => void window.dispatchEvent(new CustomEvent('kiln:save-version')) },
+  { id: 'file.versions', label: 'Version history', group: 'File', run: () => void window.dispatchEvent(new CustomEvent('kiln:versions')) },
   ...PRESETS.map((p) => ({ id: 'insert.' + p.id, label: `Insert ${p.label}`, group: `Insert · ${p.group}`, run: () => insertPreset(p.id) })),
 ]
 
@@ -621,6 +676,9 @@ export function handleKeyDown(e: KeyboardEvent) {
     runCommand(id)
   }
 
+  // ⌥⌘K / ⌥⌘B by physical key (⌥ changes e.key on the Mac); before ⌘K, which opens the palette
+  if (mod && e.altKey && !e.shiftKey && e.code === 'KeyK') return run('component.create')
+  if (mod && e.altKey && !e.shiftKey && e.code === 'KeyB') return run('component.detach')
   if (mod && k === 'k') return void (e.preventDefault(), s.set({ paletteOpen: !s.paletteOpen }))
   // drawing with the pen: Enter finishes, Delete / ⌘Z take back the last anchor (Esc finishes below)
   const pen = s.penDraft
@@ -648,6 +706,7 @@ export function handleKeyDown(e: KeyboardEvent) {
   // ⌥⌘C / ⌥⌘V by physical key: on the Mac ⌥ changes e.key ("ç", "√")
   if (mod && e.altKey && !e.shiftKey && e.code === 'KeyC') return run('edit.copyStyle')
   if (mod && e.altKey && !e.shiftKey && e.code === 'KeyV') return run('edit.pasteStyle')
+  if (mod && e.altKey && !e.shiftKey && e.code === 'KeyS') return run('file.saveVersion')
   if (mod && k === 'c' && !e.shiftKey) return run('edit.copy')
   if (mod && k === 'x') return run('edit.cut')
   if (mod && k === 'd') return run('edit.duplicate')
