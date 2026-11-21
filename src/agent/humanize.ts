@@ -96,6 +96,8 @@ export function toolLabel(name: string, input?: Args): ToolLabel {
       return { verb: 'Looking at your selection', done: 'Looked at your selection', icon: MousePointerClick, kind: 'read' }
     case 'get_screenshot':
       return { verb: 'Taking a screenshot', done: 'Took a screenshot', icon: Camera, kind: 'read' }
+    case 'review_design':
+      return { verb: 'Reviewing the design', done: 'Reviewed the design', icon: Search, kind: 'read' }
     case 'find_nodes': {
       const q = str(a.query)
       return { verb: q ? `Searching for ${quote(q, 20)}` : 'Searching layers', done: q ? `Searched for ${quote(q, 20)}` : 'Searched layers', icon: Search, kind: 'read' }

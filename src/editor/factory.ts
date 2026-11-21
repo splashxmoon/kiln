@@ -157,20 +157,37 @@ export function emptyDoc(name = 'Untitled'): KDoc {
 }
 
 /** Deep-clone a subtree with fresh ids. Returns [rootClone, allClones]. */
-export function cloneSubtree(nodes: Record<string, KNode>, id: string, newParent: string | null, pageId: string): [KNode, KNode[]] {
+export function cloneSubtree(
+  nodes: Record<string, KNode>,
+  id: string,
+  newParent: string | null,
+  pageId: string,
+  /** filled with copy id → the id it was copied from */
+  origin?: Map<string, string>,
+): [KNode, KNode[]] {
   const out: KNode[] = []
-  const walk = (srcId: string, parentId: string | null): KNode => {
+  // a copy of a main component becomes an instance of it; a copy of an instance stays one (components.ts)
+  const walk = (srcId: string, parentId: string | null, ofMain: boolean): KNode => {
     const src = nodes[srcId]
     const copy: KNode = JSON.parse(JSON.stringify(src))
     copy.id = uid()
     copy.parentId = parentId
     copy.pageId = pageId
-    copy.fills = copy.fills.map((f) => ({ ...f, id: uid(6) }))
-    copy.shadows = copy.shadows.map((s) => ({ ...s, id: uid(6) }))
+    const inMain = ofMain || !!src.main
+    if (inMain) {
+      delete copy.main
+      copy.source = srcId
+    }
+    // component copies keep fill and shadow ids, so they compare equal to their main's
+    if (!copy.source) {
+      copy.fills = copy.fills.map((f) => ({ ...f, id: uid(6) }))
+      copy.shadows = copy.shadows.map((s) => ({ ...s, id: uid(6) }))
+    }
     out.push(copy)
-    copy.children = src.children.filter((c) => nodes[c]).map((c) => walk(c, copy.id).id)
+    origin?.set(copy.id, srcId)
+    copy.children = src.children.filter((c) => nodes[c]).map((c) => walk(c, copy.id, inMain).id)
     return copy
   }
-  const root = walk(id, newParent)
+  const root = walk(id, newParent, false)
   return [root, out]
 }

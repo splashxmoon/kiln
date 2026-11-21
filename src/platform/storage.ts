@@ -10,17 +10,23 @@ import { DOC_VERSION, NewerFileError, isNewerThanApp, migrate } from '../editor/
 import {
   desktopCreateProject,
   desktopDeleteFile,
+  desktopDeleteVersion,
   desktopListFiles,
   desktopListProjects,
   desktopListTrash,
+  desktopListVersions,
   desktopLoadFile,
+  desktopLoadVersion,
   desktopMoveFile,
   desktopPurgeTrash,
   desktopRemoveProject,
   desktopRestoreTrash,
+  desktopRestoreVersion,
   desktopSaveFile,
+  desktopSaveVersion,
   desktopUpdateProject,
   isTauri,
+  type DesktopVersionMeta,
 } from './tauri'
 
 export interface FileMeta {
@@ -60,6 +66,18 @@ export interface TrashItem {
   projectId: string | null
 }
 
+/** A kept state of a file (version history). */
+export interface VersionMeta {
+  versionId: string
+  fileId: string
+  /** null for an automatic (timed) version, which pruning may remove; named ones stay until deleted */
+  name: string | null
+  createdAt: number
+  /** size of the stored document, in bytes on desktop and characters in the browser */
+  size: number
+  thumbnail?: string
+}
+
 export const PROJECT_COLORS = ['#ff5b1f', '#e8b04b', '#7fc49a', '#6fa8dc', '#a58bd8', '#d77fa1', '#a6a198'] as const
 
 export interface Storage {
@@ -86,8 +104,22 @@ export interface Storage {
 
   listTrash(): Promise<TrashItem[]>
   restore(trashId: string): Promise<void>
-  /** Deletes for good: one entry, or everything when trashId is omitted. */
+  /** Deletes for good: one entry, or everything when trashId is omitted. A purged file's versions go too. */
   purge(trashId?: string): Promise<void>
+
+  /** A file's versions, newest first. Moving a file to the trash keeps them. */
+  listVersions(fileId: string): Promise<VersionMeta[]>
+  /**
+   * Keeps a version of a file: `doc` when given (the open document, ahead of the saved file while an
+   * autosave is pending), else the file as saved. A null or blank name makes an automatic version.
+   * Resolves to null when the browser had no room for an automatic one. (Saves also keep an
+   * automatic version by themselves, when the newest is ten minutes old.)
+   */
+  saveVersion(fileId: string, name: string | null, doc?: KDoc): Promise<VersionMeta | null>
+  loadVersion(fileId: string, versionId: string): Promise<KDoc | null>
+  deleteVersion(fileId: string, versionId: string): Promise<void>
+  /** Writes a version back as the file, keeping the file's id; the file as it was becomes a version first. */
+  restoreVersion(fileId: string, versionId: string): Promise<KDoc>
 }
 
 function toMeta(doc: { id: string; name?: string; updatedAt?: number; thumbnail?: string | null; projectId?: string | null }): FileMeta {
@@ -165,6 +197,40 @@ function checkMode(mode: string) {
 
 const noProject = (id: string) => new Error(`That project doesn't exist anymore (${id})`)
 
+// ---- versions: shared rules -------------------------------------------------
+
+/** A save also keeps an automatic version when the newest one is at least this old. */
+export const AUTO_VERSION_EVERY_MS = 10 * 60 * 1000
+const DAY_MS = 86_400_000
+
+/**
+ * The automatic versions to drop: all but the newest `keepRecent` and the newest of each day (UTC)
+ * within the last `keepDays` days. The same rule as storage.rs (desktop keeps 30 + 30 days).
+ */
+export function autosToPrune(autos: readonly { versionId: string; createdAt: number }[], now: number, keepRecent: number, keepDays: number): string[] {
+  const sorted = [...autos].sort((a, b) => b.createdAt - a.createdAt || (a.versionId < b.versionId ? 1 : -1))
+  const days = new Set<number>()
+  const out: string[] = []
+  sorted.forEach((v, i) => {
+    const day = Math.floor(v.createdAt / DAY_MS)
+    const dayKeeper = now - v.createdAt < keepDays * DAY_MS && !days.has(day)
+    if (dayKeeper) days.add(day)
+    if (i >= keepRecent && !dayKeeper) out.push(v.versionId)
+  })
+  return out
+}
+
+const byNewest = (a: VersionMeta, b: VersionMeta) => b.createdAt - a.createdAt || (a.versionId < b.versionId ? 1 : -1)
+
+function versionMeta(v: DesktopVersionMeta): VersionMeta {
+  const meta: VersionMeta = { versionId: v.versionId, fileId: v.fileId, name: v.name ?? null, createdAt: v.createdAt, size: v.size }
+  if (v.thumbnail) meta.thumbnail = v.thumbnail
+  return meta
+}
+
+/** What a browser backend stores itself; versions sit beside either one, in localStorage. */
+type FileStore = Omit<Storage, 'listVersions' | 'saveVersion' | 'loadVersion' | 'deleteVersion' | 'restoreVersion'>
+
 // ---- desktop ---------------------------------------------------------------
 
 const desktopStorage: Storage = {
@@ -194,6 +260,12 @@ const desktopStorage: Storage = {
   },
   restore: (trashId) => desktopRestoreTrash(trashId),
   purge: (trashId) => desktopPurgeTrash(trashId ?? null),
+  // versions, autosave snapshots, pruning and purge are all handled in storage.rs
+  listVersions: async (fileId) => (await desktopListVersions(fileId)).map(versionMeta),
+  saveVersion: async (fileId, name, doc) => versionMeta(await desktopSaveVersion(fileId, name, doc ?? null)),
+  loadVersion: async (fileId, versionId) => ((await desktopLoadVersion(fileId, versionId)) as KDoc | null) ?? null,
+  deleteVersion: (fileId, versionId) => desktopDeleteVersion(fileId, versionId),
+  restoreVersion: async (fileId, versionId) => (await desktopRestoreVersion(fileId, versionId)) as KDoc,
 }
 
 // ---- IndexedDB -------------------------------------------------------------
@@ -322,7 +394,7 @@ async function inTx<T>(
 const getAll = <T>(s: IDBObjectStore) => req(s.getAll() as IDBRequest<T[]>)
 const getOne = <T>(s: IDBObjectStore, key: string) => req(s.get(key) as IDBRequest<T | undefined>)
 
-const idbStorage: Storage = {
+const idbStorage: FileStore = {
   kind: 'browser',
   async list() {
     const files = await inTx([FILES], 'readonly', (st) => getAll<FileRecord>(st(FILES)))
@@ -454,7 +526,7 @@ function lsTrash(f: FileRecord) {
   localStorage.removeItem(LS_FILE + f.id)
 }
 
-const localStorageStorage: Storage = {
+const localStorageStorage: FileStore = {
   kind: 'browser',
   async list() {
     return lsAll<FileRecord>(LS_FILE).map(toMeta).sort(byRecent)
@@ -524,9 +596,9 @@ const localStorageStorage: Storage = {
 
 // ---- browser: IndexedDB with a lazy fallback --------------------------------
 
-let browserBackend: Promise<Storage> | null = null
+let browserBackend: Promise<FileStore> | null = null
 
-function pickBrowserBackend(): Promise<Storage> {
+function pickBrowserBackend(): Promise<FileStore> {
   browserBackend ??= (async () => {
     if (typeof indexedDB === 'undefined') return localStorageStorage
     try {
@@ -546,11 +618,187 @@ function pickBrowserBackend(): Promise<Storage> {
   return browserBackend
 }
 
+// ---- browser versions (localStorage, whichever backend holds the files) -------
+
+/**
+ * Versions in the browser: `kiln:vlist:<fileId>` holds the list (newest first) and
+ * `kiln:vdoc:<fileId>:<versionId>` each document. localStorage is small, so fewer automatic
+ * versions are kept than on desktop, and when it is full the oldest automatic versions (this file's
+ * first, then any file's) make room. An automatic version that still doesn't fit is skipped.
+ */
+const LS_VLIST = 'kiln:vlist:'
+const LS_VDOC = 'kiln:vdoc:'
+const WEB_KEEP_RECENT = 10
+const WEB_KEEP_DAYS = 7
+const MAX_VERSION_NAME = 120
+/**
+ * The most all versions together may take, in characters (localStorage counts UTF-16 units, about
+ * 5M per site): files on the localStorage fallback, chats and settings need the rest.
+ */
+export const WEB_VERSION_BUDGET = 1_500_000
+
+const vdocKey = (fileId: string, versionId: string) => `${LS_VDOC}${fileId}:${versionId}`
+const webVersions = (fileId: string) => (lsGet<VersionMeta[]>(LS_VLIST + fileId) ?? []).sort(byNewest)
+
+function writeVersionList(fileId: string, list: VersionMeta[]) {
+  if (list.length) lsSet(LS_VLIST + fileId, [...list].sort(byNewest))
+  else localStorage.removeItem(LS_VLIST + fileId)
+}
+
+function dropVersions(fileId: string, ids: readonly string[]) {
+  if (!ids.length) return
+  for (const id of ids) localStorage.removeItem(vdocKey(fileId, id))
+  writeVersionList(
+    fileId,
+    webVersions(fileId).filter((v) => !ids.includes(v.versionId)),
+  )
+}
+
+/**
+ * Frees room: drops the oldest automatic version of `fileId`, or with `anyFile`, of any file when
+ * it has none. False when there is none to drop.
+ */
+function dropOldestAuto(fileId: string, anyFile: boolean): boolean {
+  const oldest = (id: string) => webVersions(id).filter((v) => v.name === null).at(-1)
+  let target = oldest(fileId)
+  if (!target && anyFile) {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i)
+      if (!key?.startsWith(LS_VLIST)) continue
+      const o = oldest(key.slice(LS_VLIST.length))
+      if (o && (!target || o.createdAt < target.createdAt)) target = o
+    }
+  }
+  if (!target) return false
+  dropVersions(target.fileId, [target.versionId])
+  return true
+}
+
+/** What every file's versions take now, in characters. */
+function versionChars(): number {
+  let n = 0
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i)
+    if (key?.startsWith(LS_VLIST) || key?.startsWith(LS_VDOC)) n += key.length + (localStorage.getItem(key)?.length ?? 0)
+  }
+  return n
+}
+
+/**
+ * Keeps a version within WEB_VERSION_BUDGET, making room by dropping old automatic versions: an
+ * automatic version only drops its own file's (one file never wipes another's history), a named
+ * one any file's. Null when an automatic version has no room; a named one throws instead.
+ */
+function webSaveVersion(fileId: string, name: string | null, doc: KDoc, now = Date.now()): VersionMeta | null {
+  if (doc.id !== fileId) throw new Error("The document's id doesn't match the file")
+  const clean = name?.trim().slice(0, MAX_VERSION_NAME) || null
+  // the thumbnail is kept once, in the list entry: restoring a version never needs it from the document
+  const { thumbnail, ...content } = doc
+  const json = JSON.stringify(content)
+  const meta: VersionMeta = { versionId: `${clean ? 'n' : 'a'}${now}-${nanoid(6)}`, fileId, name: clean, createdAt: now, size: json.length }
+  if (thumbnail) meta.thumbnail = thumbnail
+  const noRoom = (cause?: unknown) => {
+    if (clean) throw new Error('Not enough browser storage for another version. Delete some versions and try again.', { cause })
+    console.warn('[kiln] no room for an automatic version', cause ?? '')
+    return null
+  }
+  // the document, plus its entry in the list (which carries the thumbnail)
+  const need = vdocKey(fileId, meta.versionId).length + json.length + JSON.stringify(meta).length
+  if (need > WEB_VERSION_BUDGET) return noRoom()
+  while (versionChars() + need > WEB_VERSION_BUDGET) if (!dropOldestAuto(fileId, !!clean)) return noRoom()
+  for (;;) {
+    try {
+      localStorage.setItem(vdocKey(fileId, meta.versionId), json)
+      writeVersionList(fileId, [meta, ...webVersions(fileId)])
+      break
+    } catch (err) {
+      // the browser is full for other reasons: the same rule for what may make room
+      localStorage.removeItem(vdocKey(fileId, meta.versionId))
+      if (!dropOldestAuto(fileId, !!clean)) return noRoom(err)
+    }
+  }
+  if (!clean) {
+    const autos = webVersions(fileId).filter((v) => v.name === null)
+    dropVersions(fileId, autosToPrune(autos, now, WEB_KEEP_RECENT, WEB_KEEP_DAYS))
+  }
+  return meta
+}
+
+/** fileId → when its newest automatic version was made, so most autosaves don't read the list */
+const newestAuto = new Map<string, number>()
+
+/** The most a version's thumbnail may take in browser storage, in characters. */
+export const WEB_VERSION_THUMB_MAX = 48_000
+
+/**
+ * A thumbnail small enough for browser version history. A file's card thumbnail (a larger PNG,
+ * about 240 KB) is redrawn as a small JPG; where that can't be done, an oversized one is left out
+ * and the version shows without a preview.
+ */
+async function versionThumbnail(url: string | null | undefined): Promise<string | undefined> {
+  if (!url || url.length <= WEB_VERSION_THUMB_MAX) return url ?? undefined
+  try {
+    if (typeof createImageBitmap !== 'function' || typeof OffscreenCanvas !== 'function' || typeof FileReader !== 'function') return undefined
+    const img = await createImageBitmap(await (await fetch(url)).blob())
+    const k = Math.min(1, 360 / Math.max(img.width, img.height, 1))
+    const canvas = new OffscreenCanvas(Math.max(1, Math.round(img.width * k)), Math.max(1, Math.round(img.height * k)))
+    const g = canvas.getContext('2d')
+    if (!g) return undefined
+    g.fillStyle = '#fff' // a JPG has no transparency
+    g.fillRect(0, 0, canvas.width, canvas.height)
+    g.drawImage(img, 0, 0, canvas.width, canvas.height)
+    img.close()
+    const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.82 })
+    const small = await new Promise<string>((resolve, reject) => {
+      const r = new FileReader()
+      r.onload = () => resolve(r.result as string)
+      r.onerror = () => reject(r.error)
+      r.readAsDataURL(blob)
+    })
+    return small.length <= WEB_VERSION_THUMB_MAX ? small : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** The timed snapshot after a save; never fails the save. */
+async function webAutoVersion(doc: KDoc, now = Date.now()) {
+  try {
+    const known = newestAuto.get(doc.id) ?? webVersions(doc.id).find((v) => v.name === null)?.createdAt
+    if (known !== undefined && now >= known && now - known < AUTO_VERSION_EVERY_MS) {
+      newestAuto.set(doc.id, known)
+      return
+    }
+    // kept or skipped for lack of room, the next try is in ten minutes, not on the next autosave
+    newestAuto.set(doc.id, now)
+    const thumbnail = await versionThumbnail(doc.thumbnail)
+    webSaveVersion(doc.id, null, { ...doc, thumbnail }, now)
+  } catch (err) {
+    console.warn('[kiln] cannot keep an automatic version', err)
+  }
+}
+
+/** Drops a file's versions once nothing by its id is left in the files or the trash. */
+async function dropOrphanVersions(b: FileStore, ids: Iterable<string>) {
+  const want = new Set(ids)
+  if (!want.size) return
+  const [files, trash] = await Promise.all([b.list(), b.listTrash()])
+  for (const id of want) {
+    if (files.some((f) => f.id === id) || trash.some((t) => t.id === id)) continue
+    newestAuto.delete(id)
+    for (const v of webVersions(id)) localStorage.removeItem(vdocKey(id, v.versionId))
+    localStorage.removeItem(LS_VLIST + id)
+  }
+}
+
 const browserStorage: Storage = {
   kind: 'browser',
   list: async () => (await pickBrowserBackend()).list(),
   load: async (id) => (await pickBrowserBackend()).load(id),
-  save: async (doc, opts) => (await pickBrowserBackend()).save(doc, opts),
+  save: async (doc, opts) => {
+    await (await pickBrowserBackend()).save(doc, opts)
+    await webAutoVersion(doc)
+  },
   remove: async (id) => (await pickBrowserBackend()).remove(id),
   listProjects: async () => (await pickBrowserBackend()).listProjects(),
   createProject: async (name, color) => (await pickBrowserBackend()).createProject(name, color),
@@ -559,7 +807,36 @@ const browserStorage: Storage = {
   moveFile: async (id, projectId) => (await pickBrowserBackend()).moveFile(id, projectId),
   listTrash: async () => (await pickBrowserBackend()).listTrash(),
   restore: async (trashId) => (await pickBrowserBackend()).restore(trashId),
-  purge: async (trashId) => (await pickBrowserBackend()).purge(trashId),
+  purge: async (trashId) => {
+    const b = await pickBrowserBackend()
+    const trash = await b.listTrash()
+    const ids = trash.filter((t) => trashId === undefined || t.trashId === trashId).map((t) => t.id)
+    await b.purge(trashId)
+    await dropOrphanVersions(b, ids)
+  },
+
+  listVersions: async (fileId) => webVersions(fileId),
+  saveVersion: async (fileId, name, doc) => {
+    const d = doc ?? (await (await pickBrowserBackend()).load(fileId))
+    if (!d) throw new Error(`That file doesn't exist anymore (${fileId})`)
+    return webSaveVersion(fileId, name, d)
+  },
+  loadVersion: async (fileId, versionId) => lsGet<KDoc>(vdocKey(fileId, versionId)),
+  deleteVersion: async (fileId, versionId) => dropVersions(fileId, [versionId]),
+  restoreVersion: async (fileId, versionId) => {
+    const b = await pickBrowserBackend()
+    const v = lsGet<KDoc>(vdocKey(fileId, versionId))
+    if (!v) throw new Error('That version no longer exists')
+    const now = Date.now()
+    const shown = webVersions(fileId).find((m) => m.versionId === versionId)?.thumbnail
+    const current = await b.load(fileId)
+    if (current) webSaveVersion(fileId, null, { ...bareDoc(current), thumbnail: await versionThumbnail(current.thumbnail) }, now)
+    // the file card shows the version (its document no longer carries the thumbnail itself)
+    const doc: KDoc = { ...v, id: fileId, updatedAt: Math.max(now, (current?.updatedAt ?? 0) + 1) }
+    if (shown) doc.thumbnail = shown
+    await b.save(doc)
+    return doc
+  },
 }
 
 const backend: Storage = isTauri ? desktopStorage : browserStorage
@@ -578,6 +855,25 @@ export const storage: Storage = {
     // an older Kiln would write its own format under the newer version's label, and the newer
     // app would then skip migrating it: such a file is read-only here
     if (isNewerThanApp(doc)) throw new NewerFileError()
-    return backend.save(doc.version === DOC_VERSION ? doc : { ...doc, version: DOC_VERSION }, opts)
+    return backend.save(stamped(doc), opts)
   },
+  loadVersion: async (fileId, versionId) => {
+    const raw = await backend.loadVersion(fileId, versionId)
+    return raw ? migrate(raw) : null
+  },
+  saveVersion: async (fileId, name, doc) => {
+    if (doc && isNewerThanApp(doc)) throw new NewerFileError()
+    return backend.saveVersion(fileId, name, doc && stamped(doc))
+  },
+  restoreVersion: async (fileId, versionId) => {
+    // a version from a newer Kiln would go back as the file under that newer label
+    const raw = await backend.loadVersion(fileId, versionId)
+    if (!raw) throw new Error('That version no longer exists')
+    if (isNewerThanApp(migrate(raw))) throw new NewerFileError()
+    return migrate(await backend.restoreVersion(fileId, versionId))
+  },
+}
+
+function stamped(doc: KDoc): KDoc {
+  return doc.version === DOC_VERSION ? doc : { ...doc, version: DOC_VERSION }
 }

@@ -8,7 +8,7 @@
  */
 import type { KDoc } from './types'
 
-export const DOC_VERSION = 1
+export const DOC_VERSION = 2
 
 type Json = Record<string, unknown>
 type Step = (doc: Json) => void
@@ -42,6 +42,9 @@ const STEPS: Step[] = [
       .filter(isObj)
       .map((p) => ({ ...p, children: arr(p.children).filter((c) => typeof c === 'string' && isObj(nodes[c])) }))
   },
+  // 1 → 2: components (optional `main` and `source` on layers). Older files have none, so
+  // nothing to change; the version marks files that may hold components.
+  () => {},
 ]
 
 if (STEPS.length !== DOC_VERSION) throw new Error('migrate.ts: STEPS must have one step per version')

@@ -73,4 +73,14 @@ describe('migrate', () => {
     expect(() => migrate({ id: 'z', version: DOC_VERSION, nodes: {}, pages: [] })).toThrow(UnreadableFileError)
     expect(() => migrate({ ...emptyDoc(), version: DOC_VERSION + 1, pages: undefined })).toThrow(UnreadableFileError)
   })
+
+  it('upgrades a version 1 file to version 2 (components) without changing its layers', () => {
+    const v1 = { ...migrate(legacyFile()), version: 1 }
+    const doc = migrate(v1)
+    expect(DOC_VERSION).toBe(2)
+    expect(doc.version).toBe(2)
+    expect(doc.nodes).toEqual(v1.nodes)
+    expect(doc.pages).toEqual(v1.pages)
+    expect(Object.values(doc.nodes).some((n) => n.main || n.source)).toBe(false)
+  })
 })

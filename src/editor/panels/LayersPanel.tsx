@@ -23,6 +23,7 @@ import {
   Check,
   Layers as LayersIcon,
   Search,
+  Diamond,
 } from 'lucide-react'
 import { useEditor, getEditor, ancestors, descendants, sortByOrder } from '../store'
 import type { KNode, Token } from '../types'
@@ -36,9 +37,17 @@ import './layers-filter.css'
 import './tokens.css'
 import { tokenVarName } from '../style'
 import { shortcut, isMod } from '../../platform/keys'
+import { insertInstance } from '../commands'
+
+/** Components' own colour: a main is a filled diamond, an instance an outlined one. */
+export const COMPONENT_COLOR = '#b49bf6'
 
 export function TypeIcon({ node, size = 13 }: { node: KNode; size?: number }) {
   const p = { size, strokeWidth: 1.75 }
+  // an instance root mirrors a main root (components.ts)
+  const instance = useEditor((s) => !!node.source && !!s.doc.nodes[node.source]?.main)
+  if (node.main) return <Diamond {...p} fill="currentColor" style={{ color: COMPONENT_COLOR }} aria-label="Main component" />
+  if (instance) return <Diamond {...p} style={{ color: COMPONENT_COLOR }} aria-label="Instance" />
   switch (node.type) {
     case 'frame':
       return node.parentId === null ? <Frame {...p} /> : <LayoutGrid {...p} />
@@ -610,6 +619,7 @@ function Assets() {
   }, [])
   return (
     <div className="k-assets">
+      <ComponentAssets />
       {Object.entries(groups).map(([group, items]) => (
         <div key={group} className="k-asset-group">
           <div className="k-asset-title">{group}</div>
@@ -625,6 +635,28 @@ function Assets() {
           </div>
         </div>
       ))}
+    </div>
+  )
+}
+
+/** The file's main components; click one to insert an instance in the middle of the view. */
+function ComponentAssets() {
+  const nodes = useEditor((s) => s.doc.nodes)
+  const mains = useMemo(() => Object.values(nodes).filter((n) => n.main), [nodes])
+  if (!mains.length) return null
+  return (
+    <div className="k-asset-group">
+      <div className="k-asset-title">In this file</div>
+      <div className="k-asset-grid">
+        {mains.map((m) => (
+          <button key={m.id} className="k-asset" onClick={() => insertInstance(m.id)} title={`Insert an instance of ${m.name}`}>
+            <span className="k-asset-thumb" style={{ color: COMPONENT_COLOR, background: 'var(--k-raise)' }}>
+              <Diamond size={16} strokeWidth={1.75} fill="currentColor" />
+            </span>
+            <span>{m.name}</span>
+          </button>
+        ))}
+      </div>
     </div>
   )
 }

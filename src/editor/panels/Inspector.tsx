@@ -35,6 +35,10 @@ import {
   ChevronDown,
   Check,
   Droplet,
+  Diamond,
+  Unlink,
+  RotateCcw,
+  Crosshair,
 } from 'lucide-react'
 import { useShallow } from 'zustand/react/shallow'
 import { useEditor, getEditor } from '../store'
@@ -49,8 +53,9 @@ import { measure, measureSize } from '../geometry'
 import { FONT_FAMILIES, FONT_WEIGHTS, ensureFont } from '../fonts'
 import { SHADER_DEFS, SHADER_KINDS, defaultShaderSpec } from '../../shaders/defs'
 import { readAsDataURL } from '../images'
-import { TypeIcon } from './LayersPanel'
-import { COMMANDS, runCommand } from '../commands'
+import { TypeIcon, COMPONENT_COLOR } from './LayersPanel'
+import { COMMANDS, runCommand, goToMain, insertInstance } from '../commands'
+import { detach, instanceRootOf, resetOverrides } from '../components'
 
 type Recipe = (n: Draft<KNode>) => void
 
@@ -84,6 +89,7 @@ export function Inspector() {
         <span className="k-insp-type">{nodes.length > 1 ? 'Mixed' : n.parentId === null && n.type === 'frame' ? 'Artboard' : n.type}</span>
       </div>
       <AlignBar />
+      {nodes.length === 1 && <ComponentSection n={n} />}
       <PositionSection nodes={nodes} set={set} />
       {(only('frame') || only('shader')) && <LayoutSection n={n} set={set} />}
       {only('text') && <TextSection n={n} set={set} />}
@@ -96,6 +102,58 @@ export function Inspector() {
       <EffectsSection n={n} set={set} />
       <DataSection n={n} set={set} />
     </div>
+  )
+}
+
+/* -------------------------------------------------------------- components (components.ts) */
+
+/** For a main: its instance count and Insert instance. For a layer in an instance: its main, Go to main, Reset, Detach. */
+function ComponentSection({ n }: { n: KNode }) {
+  const nodes = useEditor((s) => s.doc.nodes)
+  const info = useMemo(() => {
+    const doc = getEditor().doc
+    if (n.main) return { kind: 'main' as const, count: Object.values(nodes).filter((x) => x.source === n.id).length }
+    const root = instanceRootOf(doc, n.id)
+    const main = root ? nodes[root.source!] : undefined
+    return root && main ? { kind: 'instance' as const, root, main } : null
+  }, [n, nodes])
+  if (!info) return null
+  const notify = (t: string) => getEditor().notify(t)
+  return (
+    <Section title={info.kind === 'main' ? 'Main component' : 'Instance'}>
+      {info.kind === 'main' ? (
+        <Row gap={8}>
+          <Diamond size={13} strokeWidth={1.75} fill="currentColor" style={{ color: COMPONENT_COLOR, flex: 'none' }} />
+          <span style={{ flex: 1, fontSize: 12, color: 'var(--k-muted)' }}>
+            {info.count === 0 ? 'No instances yet' : info.count === 1 ? '1 instance' : `${info.count} instances`}
+          </span>
+          <button className="k-btn-ghost k-sm" onClick={() => insertInstance(n.id)} title="Insert an instance beside it">
+            <Plus size={11} /> Insert instance
+          </button>
+        </Row>
+      ) : (
+        <>
+          <Row gap={8}>
+            <Diamond size={13} strokeWidth={1.75} style={{ color: COMPONENT_COLOR, flex: 'none' }} />
+            <span style={{ flex: 1, fontSize: 12, color: 'var(--k-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {info.root.id === n.id ? 'Of ' : 'Inside an instance of '}
+              <b style={{ color: 'var(--k-text)', fontWeight: 500 }}>{info.main.name}</b>
+            </span>
+          </Row>
+          <Row gap={6}>
+            <button className="k-btn-ghost k-sm" onClick={() => goToMain(info.main.id)} title="Select the main component">
+              <Crosshair size={11} /> Go to main
+            </button>
+            <button className="k-btn-ghost k-sm" onClick={() => resetOverrides(n.id) && notify('Reset to the main component')} title="Put this layer back to how the main is">
+              <RotateCcw size={11} /> Reset
+            </button>
+            <button className="k-btn-ghost k-sm" onClick={() => detach(n.id) && notify('Detached the instance')} title="Unlink from the main; keeps its look">
+              <Unlink size={11} /> Detach
+            </button>
+          </Row>
+        </>
+      )}
+    </Section>
   )
 }
 

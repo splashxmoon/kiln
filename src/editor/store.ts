@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { produce, type Draft } from 'immer'
 import type { Camera, Comment, KDoc, KNode, Page, PathPoint, Tool } from './types'
+import { syncInstances } from './components'
 import { cloneSubtree, createNode, createPage, emptyDoc, uid } from './factory'
 import { measure, measureLocal, measureSize } from './geometry'
 import { buildPath } from './vector'
@@ -174,6 +175,8 @@ function loadView(): ViewPrefs {
 }
 
 export type RightTab = 'design' | 'code' | 'agent'
+  // design review panel (review.ts)
+  | 'review'
 export type LeftTab = 'layers' | 'assets' | 'tokens'
 
 interface History {
@@ -362,14 +365,15 @@ export const useEditor = create<EditorState>((set, get) => {
 
     update(recipe, key) {
       const prev = get().doc
-      const next = produce(prev, recipe)
+      // a main component's change spreads into its instances in the same undo step (components.ts)
+      const next = syncInstances(prev, produce(prev, recipe))
       if (next === prev) return
       record(key)
       commit(next)
     },
     updateSilently(recipe) {
       const prev = get().doc
-      const next = produce(prev, recipe)
+      const next = syncInstances(prev, produce(prev, recipe))
       if (next !== prev) commit(next)
     },
     checkpoint() {
