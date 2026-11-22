@@ -19,6 +19,7 @@ import { produce } from 'immer'
 import type { KDoc, KNode } from './types'
 import { uid } from './factory'
 import { getEditor } from './store'
+import { measureSize } from './geometry'
 
 /** Never copied from a main into its instances. */
 const NEVER = new Set(['id', 'parentId', 'pageId', 'children', 'source', 'main', 'name'])
@@ -91,14 +92,27 @@ function cloneAsInstance(doc: KDoc, mainNodeId: string, parentId: string | null,
   return copy.id
 }
 
+/** Delete a layer and what is inside it; a child already moved elsewhere (its parentId says so) stays. */
 function removeDeep(d: Draft<KDoc>, id: string) {
   const n = d.nodes[id]
   if (!n) return
-  for (const c of n.children) removeDeep(d, c)
+  for (const c of n.children) if (d.nodes[c]?.parentId === id) removeDeep(d, c)
   delete d.nodes[id]
 }
 
 /* ------------------------------------------------------------------ sync */
+
+/**
+ * Lists that hold the same rows in the same order on all three sides (fills, shadows, radii…), so
+ * they can be merged row by row: rows with ids keep their ids, and the instance's own rows
+ * line up with the main's.
+ */
+function sameRows(a: unknown, b: unknown, cur: unknown): a is unknown[] {
+  if (!Array.isArray(a) || !Array.isArray(b) || !Array.isArray(cur)) return false
+  if (a.length !== b.length || cur.length !== a.length) return false
+  const id = (v: unknown) => (isPlain(v) ? v.id : undefined)
+  return a.every((x, i) => id(x) === id(b[i]) && id(x) === id(cur[i]))
+}
 
 /** Three-way merge of one main layer's change (was → now) into a layer mirroring it. */
 function merge(target: Rec, was: Rec, now: Rec, skip?: Set<string>) {
@@ -109,6 +123,8 @@ function merge(target: Rec, was: Rec, now: Rec, skip?: Set<string>) {
     if (a === b) continue
     const cur = target[k]
     if (isPlain(a) && isPlain(b) && isPlain(cur)) merge(cur, a, b)
+    // a change inside one row (a fill's opacity) leaves the instance's change to another key of it (its colour)
+    else if (sameRows(a, b, cur)) merge(cur as unknown as Rec, a as unknown as Rec, b as unknown as Rec)
     else if (sameValue(cur, a)) {
       if (b === undefined) delete target[k]
       else target[k] = b
@@ -116,45 +132,116 @@ function merge(target: Rec, was: Rec, now: Rec, skip?: Set<string>) {
   }
 }
 
-/** Make an instance layer's children follow the main's: added, removed and reordered. */
-function syncChildren(d: Draft<KDoc>, next: KDoc, inst: Draft<KNode>, was: KNode, now: KNode) {
+/** What one sync pass works from. */
+interface Pass {
+  prev: KDoc
+  next: KDoc
+  /** main layer id → the layers mirroring it (in `next`) */
+  mirrors: Map<string, string[]>
+  /** mirrors taken out of a children list because their main layer moved; removed at the end unless re-homed */
+  pending: Set<string>
+  /** mirrors of deleted main layers: removed at the end, once what moved out of them has moved */
+  doomed: Set<string>
+}
+
+/** The instance root a layer belongs to, in the draft. */
+function rootIn(d: Draft<KDoc>, id: string): string | undefined {
+  for (let n: Draft<KNode> | undefined = d.nodes[id]; n; n = n.parentId ? d.nodes[n.parentId] : undefined) if (n.source && d.nodes[n.source]?.main) return n.id
+  return undefined
+}
+
+/**
+ * The instance's layer for main layer `k`, placed in `parentId`: its existing mirror (moved there,
+ * so overrides go with it) when the main moved the layer, a fresh copy when the layer is new, or
+ * null when the layer was already in the main and the instance has no mirror of it (deleted there).
+ */
+function adopt(d: Draft<KDoc>, p: Pass, root: string | undefined, k: string, parentId: string, pageId: string): string | null {
+  const have = (p.mirrors.get(k) ?? []).find((m) => d.nodes[m] && rootIn(d, m) === root)
+  if (have) {
+    const from = d.nodes[have].parentId
+    if (from && from !== parentId && d.nodes[from]) d.nodes[from].children = d.nodes[from].children.filter((c) => c !== have)
+    d.nodes[have].parentId = parentId
+    p.pending.delete(have)
+    return have
+  }
+  const home = mainRootOf(p.next, k)?.id
+  if (p.prev.nodes[k] && mainRootOf(p.prev, k)?.id === home) return null
+  const src = p.next.nodes[k]
+  const copy: KNode = JSON.parse(JSON.stringify(src))
+  copy.id = uid()
+  copy.parentId = parentId
+  copy.pageId = pageId
+  delete copy.main
+  copy.source = k
+  copy.children = src.children.filter((c) => p.next.nodes[c]).flatMap((c) => adopt(d, p, root, c, copy.id, pageId) ?? [])
+  d.nodes[copy.id] = copy as Draft<KNode>
+  return copy.id
+}
+
+/**
+ * Make an instance layer's children follow the main's: added, removed, moved and reordered.
+ * The instance's own layers stay after the layer they followed.
+ */
+function syncChildren(d: Draft<KDoc>, p: Pass, inst: Draft<KNode>, was: KNode, now: KNode) {
   const before = new Set(was.children)
   const after = new Set(now.children)
   const mine = [...inst.children]
   const bySource = new Map<string, string>()
   for (const c of mine) {
     const s = d.nodes[c]?.source
-    if (s && !bySource.has(s)) bySource.set(s, c)
+    if (s && after.has(s) && !bySource.has(s)) bySource.set(s, c)
   }
-  const out: string[] = []
-  for (const k of now.children) {
-    const have = bySource.get(k)
-    if (have) out.push(have)
-    else if (!before.has(k)) {
-      // new in the main: copy it in
-      const made: KNode[] = []
-      const id = cloneAsInstance(next, k, inst.id, inst.pageId, made)
-      for (const m of made) d.nodes[m.id] = m as Draft<KNode>
-      out.push(id)
-    }
-    // else: the instance deleted it, an override that stays
-  }
+  const home = mainRootOf(p.next, now.id)?.id
+  // the instance's own layers, by the main layer whose mirror they came after (null: first)
+  const ownAfter = new Map<string | null, string[]>()
+  let anchor: string | null = null
   for (const c of mine) {
     const s = d.nodes[c]?.source
-    if (s && before.has(s) && !after.has(s)) removeDeep(d, c) // removed from the main
-    else if (!s || !after.has(s) || bySource.get(s) !== c) out.push(c) // the instance's own layers stay, at the end
+    if (s && bySource.get(s) === c) anchor = s
+    else if (s && before.has(s) && !after.has(s)) {
+      // gone from here in the main: moved within it (the mirror moves too), or deleted
+      if (p.next.nodes[s] && mainRootOf(p.next, s)?.id === home) p.pending.add(c)
+      else p.doomed.add(c)
+    } else (ownAfter.get(anchor) ?? ownAfter.set(anchor, []).get(anchor)!).push(c)
   }
+  const root = rootIn(d, inst.id)
+  const out: string[] = [...(ownAfter.get(null) ?? [])]
+  for (const k of now.children) {
+    const have = bySource.get(k) ?? (before.has(k) ? null : adopt(d, p, root, k, inst.id, inst.pageId))
+    if (have) out.push(have)
+    // else: the instance deleted it, an override that stays
+    out.push(...(ownAfter.get(k) ?? []))
+    ownAfter.delete(k)
+  }
+  ownAfter.delete(null)
+  for (const rest of ownAfter.values()) out.push(...rest) // they followed a layer the main took out
   if (out.length !== mine.length || out.some((c, i) => c !== mine[i])) inst.children = out
 }
 
 /** What a sync did that the person should hear about. */
 type Report = { loops: number; detached: number }
 
-function clearSource(d: Draft<KDoc>, id: string) {
+/**
+ * Unlink a layer and what is inside it from the main it mirrors. Whole instances inside stay
+ * linked: a real one (mirroring a main root) is left alone, and a mirror of an instance the main
+ * holds becomes an instance of that one's main. With `keepInner` false, every link inside goes.
+ */
+function unlink(d: Draft<KDoc>, id: string, root = true, keepInner = true) {
   const n = d.nodes[id]
   if (!n) return
-  delete n.source
-  n.children.forEach((c) => clearSource(d, c))
+  const src = n.source ? d.nodes[n.source] : undefined
+  if (keepInner && !root && src?.main) return
+  if (keepInner && !root && src?.source) n.source = src.source
+  else delete n.source
+  n.children.forEach((c) => unlink(d, c, false, keepInner))
+}
+
+/** An instance root that isn't in an auto-layout frame can't fill: it keeps its own size mode. */
+function keepFree(d: Draft<KDoc>, n: Draft<KNode>, w: KNode['widthMode'], h: KNode['heightMode']) {
+  const parent = n.parentId ? d.nodes[n.parentId] : undefined
+  if (parent?.layout.mode === 'flex') return
+  if (n.widthMode === 'fill') n.widthMode = w === 'fill' ? 'fixed' : w
+  if (n.heightMode === 'fill') n.heightMode = h === 'fill' ? 'fixed' : h
 }
 
 /**
@@ -186,7 +273,19 @@ function breakLoops(prev: KDoc, doc: KDoc, report: Report): KDoc {
   const cut = bad.some(isNew) ? bad.filter(isNew) : bad
   report.loops += cut.length
   return produce(doc, (d) => {
-    for (const h of cut) clearSource(d, h.id)
+    for (const h of cut) unlink(d, h.id, true, false) // everything inside it too: any of it could close the loop again
+  })
+}
+
+/** Mirrors this edit moved out of every instance (dragged onto the canvas, say): they stop following. */
+function dropStrays(prev: KDoc, next: KDoc, changed: string[]): KDoc {
+  const strays = changed.filter((id) => {
+    const n = next.nodes[id]
+    return !!n?.source && !next.nodes[n.source]?.main && prev.nodes[id]?.parentId !== n.parentId && !instanceRootOf(next, id)
+  })
+  if (!strays.length) return next
+  return produce(next, (d) => {
+    for (const id of strays) unlink(d, id)
   })
 }
 
@@ -196,6 +295,7 @@ function syncOnce(prev: KDoc, next: KDoc, report: Report): KDoc {
   const changed: string[] = []
   for (const id in next.nodes) if (next.nodes[id] !== prev.nodes[id]) changed.push(id)
   for (const id in prev.nodes) if (!next.nodes[id]) changed.push(id)
+  next = dropStrays(prev, next, changed)
   const relevant = changed.filter((id) => mainRootOf(next, id) || mainRootOf(prev, id))
   if (!relevant.length) return next
   next = breakLoops(prev, next, report)
@@ -205,6 +305,7 @@ function syncOnce(prev: KDoc, next: KDoc, report: Report): KDoc {
     const s = next.nodes[id].source
     if (s) (mirrors.get(s) ?? mirrors.set(s, []).get(s)!).push(id)
   }
+  const pass: Pass = { prev, next, mirrors, pending: new Set(), doomed: new Set() }
   return produce(next, (d) => {
     for (const id of relevant) {
       const was = prev.nodes[id]
@@ -213,9 +314,17 @@ function syncOnce(prev: KDoc, next: KDoc, report: Report): KDoc {
       for (const iid of mirrors.get(id) ?? []) {
         const inst = d.nodes[iid]
         if (!inst) continue
+        const { widthMode, heightMode } = inst
         merge(inst as unknown as Rec, was as unknown as Rec, now as unknown as Rec, now.main ? new Set([...NEVER, ...ROOT_OWN]) : NEVER)
-        if (was.children !== now.children) syncChildren(d, next, inst, was, now)
+        if (now.main) keepFree(d, inst, widthMode, heightMode)
+        if (was.children !== now.children) syncChildren(d, pass, inst, was, now)
       }
+    }
+    // mirrors whose main layer moved somewhere this instance doesn't follow (a part it deleted) go
+    for (const id of pass.doomed) removeDeep(d, id)
+    for (const id of pass.pending) {
+      const n = d.nodes[id]
+      if (n && !(n.parentId && d.nodes[n.parentId]?.children.includes(id))) removeDeep(d, id)
     }
     // layers mirroring something deleted from a main (a deleted main, say) are detached
     for (const id in next.nodes) {
@@ -253,35 +362,54 @@ export function syncInstances(prev: KDoc, next: KDoc): KDoc {
 
 /* ------------------------------------------------------------------ paste */
 
-/** Where cut-and-pasted mains went in this session: an old main layer id → the layer pasted for it. */
-const moved = new Map<string, string>()
-
 /**
- * Fix the component links of freshly pasted layers (pre-order, as cloneSubtree gives them) for
- * `doc`, the file they go into. A copy of a main whose main is gone (cut, or from another file)
- * becomes the main itself, and later pastes of it become its instances; any other link to a
- * layer that isn't there is dropped. Changes `nodes` in place.
+ * Fix the component links of freshly pasted layers for `doc`, the file they go into. A copy of a
+ * main whose main isn't there (it was cut, or comes from another file) becomes that main again
+ * and takes back the main's own layer ids, so any later paste of the same clipboard (after a
+ * reload too, with nothing kept in memory) finds it and becomes its instance. Any other link to
+ * a layer that isn't there is dropped. Changes `nodes` in place and returns the renames
+ * (pasted id → id taken back), which the caller applies to its list of roots.
  */
-export function relinkPasted(doc: KDoc, nodes: KNode[], fromMain: (pastedId: string) => boolean) {
+export function relinkPasted(
+  doc: KDoc,
+  nodes: KNode[],
+  fromMain: (pastedId: string) => boolean,
+  /** the link the original layer had, for layers copied from inside a main */
+  linkOf: (pastedId: string) => string | undefined = () => undefined,
+): Map<string, string> {
   const byId = new Map(nodes.map((n) => [n.id, n]))
+  const rename = new Map<string, string>()
+  const taken = new Set<string>()
   const promote = (n: KNode) => {
-    if (n.source) moved.set(n.source, n.id)
+    const s = n.source
     delete n.source
+    const back = linkOf(n.id)
+    if (back && doc.nodes[back]) n.source = back // an instance inside the main stays one
+    if (s && !doc.nodes[s] && !taken.has(s)) {
+      rename.set(n.id, s)
+      taken.add(s)
+    }
     for (const c of n.children) {
       const k = byId.get(c)
       if (k) promote(k)
     }
   }
+  // mains first, so copies of them in the same paste link to them
   for (const n of nodes) {
-    const s = n.source
-    if (!s || doc.nodes[s]) continue
-    const to = moved.get(s)
-    if (to && doc.nodes[to]) n.source = to
-    else if (fromMain(n.id)) {
+    if (n.source && !doc.nodes[n.source] && !taken.has(n.source) && fromMain(n.id)) {
       promote(n)
       n.main = true
-    } else delete n.source
+    }
   }
+  for (const n of nodes) if (n.source && !doc.nodes[n.source] && !taken.has(n.source)) delete n.source
+  if (rename.size) {
+    for (const n of nodes) {
+      n.id = rename.get(n.id) ?? n.id
+      if (n.parentId) n.parentId = rename.get(n.parentId) ?? n.parentId
+      n.children = n.children.map((c) => rename.get(c) ?? c)
+    }
+  }
+  return rename
 }
 
 /* ------------------------------------------------------------------ editing (one undo step each) */
@@ -308,7 +436,7 @@ export function makeComponent(id: string): boolean {
     return false
   }
   s.update((d) => {
-    clearSource(d, id)
+    unlink(d, id)
     d.nodes[id].main = true
   })
   return true
@@ -334,8 +462,15 @@ export function createInstance(mainId: string, at: { pageId: string; x: number; 
   root.positioning = 'auto'
   // a main sized to fill its parent keeps its width and height as a free-standing copy
   if (!at.parentId) {
-    if (root.widthMode === 'fill') root.widthMode = 'fixed'
-    if (root.heightMode === 'fill') root.heightMode = 'fixed'
+    const drawn = measureSize(mainId)
+    if (root.widthMode === 'fill') {
+      root.widthMode = 'fixed'
+      if (drawn) root.width = Math.round(drawn.w)
+    }
+    if (root.heightMode === 'fill') {
+      root.heightMode = 'fixed'
+      if (drawn) root.height = Math.round(drawn.h)
+    }
   }
   s.insertNodes(made, [rootId], at.parentId ?? null)
   s.set({ selection: [rootId] })
@@ -347,7 +482,7 @@ export function detach(id: string): boolean {
   const s = getEditor()
   const r = instanceRootOf(s.doc, id)
   if (!r) return false
-  s.update((d) => clearSource(d, r.id))
+  s.update((d) => unlink(d, r.id))
   return true
 }
 
@@ -363,6 +498,7 @@ export function resetOverrides(id: string): boolean {
   if (!n || !m) return false
   const own = isInstance(doc, id) ? new Set([...NEVER, ...ROOT_OWN]) : NEVER
   s.update((d) => {
+    const { widthMode, heightMode } = d.nodes[id]
     const x = d.nodes[id] as unknown as Rec
     const main = m as unknown as Rec
     for (const k of new Set([...Object.keys(x), ...Object.keys(main)])) {
@@ -371,6 +507,7 @@ export function resetOverrides(id: string): boolean {
       else if (!sameValue(x[k], main[k])) x[k] = JSON.parse(JSON.stringify(main[k]))
     }
     const target = d.nodes[id]
+    if (own !== NEVER) keepFree(d, target, widthMode, heightMode) // an instance root
     for (const c of target.children) removeDeep(d, c)
     const made: KNode[] = []
     target.children = m.children.filter((c) => doc.nodes[c]).map((c) => cloneAsInstance(doc, c, id, target.pageId, made))

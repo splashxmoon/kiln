@@ -103,6 +103,14 @@ interface Open {
 }
 let open: Open | null = null
 
+/**
+ * The same document content. Undo and redo hand back a history entry restamped (store.ts), a new
+ * object over the same pages, layers, tokens and comments, so identity alone would miss it.
+ */
+function sameDoc(a: KDoc | undefined, b: KDoc) {
+  return a === b || (!!a && a.id === b.id && a.name === b.name && a.pages === b.pages && a.nodes === b.nodes && a.tokens === b.tokens && a.comments === b.comments)
+}
+
 function onStoreChange(s: ReturnType<typeof getEditor>, prev: ReturnType<typeof getEditor>) {
   // a turn ends, or hands straight over to another (a terminal agent's turn, then one sent here)
   if (open && s.agentTurn?.startedAt !== open.id) {
@@ -136,15 +144,15 @@ function onStoreChange(s: ReturnType<typeof getEditor>, prev: ReturnType<typeof 
     }
   }
   // undoing a revert brings the turn's changes back: it can be reverted again
-  if (s.doc !== prev.doc && turns.some((t) => t.reverted && t.preRevert === s.doc)) {
-    turns = turns.map((t) => (t.reverted && t.preRevert === s.doc ? { ...t, reverted: false, preRevert: undefined } : t))
+  if (s.doc !== prev.doc && turns.some((t) => t.reverted && sameDoc(t.preRevert, s.doc))) {
+    turns = turns.map((t) => (t.reverted && sameDoc(t.preRevert, s.doc) ? { ...t, reverted: false, preRevert: undefined } : t))
     emit()
   }
 }
 
 function finish(t: Open) {
   const s = getEditor()
-  if (!t.agentEdits || s.doc === t.before || s.doc.id !== t.before.id) return
+  if (!t.agentEdits || sameDoc(s.doc, t.before) || s.doc.id !== t.before.id) return
   // fold the agent's steps into one: keep history up to and including the doc the turn started from
   if (!t.foreign && t.firstEntry) {
     const past = s.history.past

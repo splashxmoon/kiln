@@ -166,8 +166,10 @@ export function cloneSubtree(
   origin?: Map<string, string>,
 ): [KNode, KNode[]] {
   const out: KNode[] = []
-  // a copy of a main component becomes an instance of it; a copy of an instance stays one (components.ts)
-  const walk = (srcId: string, parentId: string | null, ofMain: boolean): KNode => {
+  // a copy of a main component becomes an instance of it; a copy of an instance stays one (components.ts).
+  // A copy of a layer from inside an instance is a plain layer: it would otherwise be a second
+  // mirror of the main's layer, following it silently. Whole instances inside it stay instances.
+  const walk = (srcId: string, parentId: string | null, ofMain: boolean, plain: boolean): KNode => {
     const src = nodes[srcId]
     const copy: KNode = JSON.parse(JSON.stringify(src))
     copy.id = uid()
@@ -177,6 +179,11 @@ export function cloneSubtree(
     if (inMain) {
       delete copy.main
       copy.source = srcId
+    } else if (plain && copy.source) {
+      const of = nodes[copy.source]
+      if (of?.main) plain = false // a whole instance inside: it stays one
+      else if (of?.source) copy.source = of.source // a copy of an instance the main holds: one of that main
+      else delete copy.source
     }
     // component copies keep fill and shadow ids, so they compare equal to their main's
     if (!copy.source) {
@@ -185,9 +192,11 @@ export function cloneSubtree(
     }
     out.push(copy)
     origin?.set(copy.id, srcId)
-    copy.children = src.children.filter((c) => nodes[c]).map((c) => walk(c, copy.id, inMain).id)
+    copy.children = src.children.filter((c) => nodes[c]).map((c) => walk(c, copy.id, inMain, plain).id)
     return copy
   }
-  const root = walk(id, newParent, false)
+  // only when the main's layer is here to tell (in a clipboard the main is missing: paste relinks)
+  const s = nodes[id]?.source
+  const root = walk(id, newParent, false, !!s && !!nodes[s] && !nodes[s].main)
   return [root, out]
 }

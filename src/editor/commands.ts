@@ -48,8 +48,12 @@ const hasFrameSel = () => getEditor().selection.some((id) => getEditor().doc.nod
 /* ------------------------------------------------------------------ clipboard */
 
 const MARK = 'kiln/clipboard:'
-/** `mains`: the clipboard layers copied from a main component root. */
-type ClipPayload = { nodes: KNode[]; roots: string[]; sources?: string[]; mains?: string[] }
+/**
+ * `mains`: the clipboard layers copied from a main component root. `links`: for clipboard layers
+ * copied from inside a main, the link the original had (an instance inside the main), which a
+ * paste that brings the main back restores.
+ */
+type ClipPayload = { nodes: KNode[]; roots: string[]; sources?: string[]; mains?: string[]; links?: Record<string, string> }
 let memoryClipboard: ClipPayload | null = null
 
 export async function copySelection(cut = false) {
@@ -81,7 +85,12 @@ export async function copySelection(cut = false) {
     roots.push(root.id)
   }
   const mains = [...origin].filter(([, from]) => s.doc.nodes[from]?.main).map(([copy]) => copy)
-  memoryClipboard = { nodes, roots, sources: ids, mains }
+  const links: Record<string, string> = {}
+  for (const [copy, from] of origin) {
+    const was = s.doc.nodes[from]?.source
+    if (was) links[copy] = was
+  }
+  memoryClipboard = { nodes, roots, sources: ids, mains, links }
   try {
     await navigator.clipboard.writeText(MARK + JSON.stringify(memoryClipboard))
   } catch {
@@ -105,7 +114,9 @@ function pasteNodes(payload: ClipPayload) {
   }
   // a cut main (or one from another file) comes back as the main; other broken links are dropped
   const mains = new Set(payload.mains ?? [])
-  relinkPasted(s.doc, nodes, (id) => mains.has(origin.get(id) ?? ''))
+  const links = payload.links ?? {}
+  const rename = relinkPasted(s.doc, nodes, (id) => mains.has(origin.get(id) ?? ''), (id) => links[origin.get(id) ?? ''])
+  roots.forEach((r, i) => (roots[i] = rename.get(r) ?? r))
   const target = s.selection.length === 1 ? s.doc.nodes[s.selection[0]] : null
   // pasting while the copied layer itself is selected → paste next to it, not inside it
   const isSource = !!target && !!payload.sources?.includes(target.id)

@@ -205,10 +205,12 @@ const DAY_MS = 86_400_000
 
 /**
  * The automatic versions to drop: all but the newest `keepRecent` and the newest of each day (UTC)
- * within the last `keepDays` days. The same rule as storage.rs (desktop keeps 30 + 30 days).
+ * within the last `keepDays` days. The same rule as storage.rs (desktop keeps 30 + 30 days). One
+ * dated after `now` (the clock is behind where it was) is left alone and takes no place, so it
+ * never crowds out the versions made now.
  */
 export function autosToPrune(autos: readonly { versionId: string; createdAt: number }[], now: number, keepRecent: number, keepDays: number): string[] {
-  const sorted = [...autos].sort((a, b) => b.createdAt - a.createdAt || (a.versionId < b.versionId ? 1 : -1))
+  const sorted = autos.filter((v) => v.createdAt <= now).sort((a, b) => b.createdAt - a.createdAt || (a.versionId < b.versionId ? 1 : -1))
   const days = new Set<number>()
   const out: string[] = []
   sorted.forEach((v, i) => {
@@ -638,10 +640,33 @@ const MAX_VERSION_NAME = 120
 export const WEB_VERSION_BUDGET = 1_500_000
 
 const vdocKey = (fileId: string, versionId: string) => `${LS_VDOC}${fileId}:${versionId}`
-const webVersions = (fileId: string) => (lsGet<VersionMeta[]>(LS_VLIST + fileId) ?? []).sort(byNewest)
+const VERSION_ID = /^([an])(\d+)-/
+
+/**
+ * A file's versions, newest first. Without a readable list, they are found again from the stored
+ * documents' keys (named ones then show as "Untitled version", as on desktop): otherwise they could
+ * no longer be opened or deleted, and would take up the budget for good.
+ */
+function webVersions(fileId: string): VersionMeta[] {
+  const list = lsGet<unknown>(LS_VLIST + fileId)
+  if (Array.isArray(list)) {
+    return (list as VersionMeta[]).filter((v) => typeof v?.versionId === 'string' && typeof v.createdAt === 'number').sort(byNewest)
+  }
+  const prefix = `${LS_VDOC}${fileId}:`
+  const found: VersionMeta[] = []
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i)
+    const m = key?.startsWith(prefix) ? VERSION_ID.exec(key.slice(prefix.length)) : null
+    if (!key || !m) continue
+    const named = m[1] === 'n'
+    found.push({ versionId: key.slice(prefix.length), fileId, name: named ? 'Untitled version' : null, createdAt: Number(m[2]), size: localStorage.getItem(key)?.length ?? 0 })
+  }
+  return found.sort(byNewest)
+}
 
 function writeVersionList(fileId: string, list: VersionMeta[]) {
-  if (list.length) lsSet(LS_VLIST + fileId, [...list].sort(byNewest))
+  const unique = [...new Map(list.map((v) => [v.versionId, v])).values()]
+  if (unique.length) lsSet(LS_VLIST + fileId, unique.sort(byNewest))
   else localStorage.removeItem(LS_VLIST + fileId)
 }
 
@@ -707,9 +732,11 @@ function webSaveVersion(fileId: string, name: string | null, doc: KDoc, now = Da
   if (need > WEB_VERSION_BUDGET) return noRoom()
   while (versionChars() + need > WEB_VERSION_BUDGET) if (!dropOldestAuto(fileId, !!clean)) return noRoom()
   for (;;) {
+    // read before the document is written: without a list yet, it would be found from its key
+    const list = webVersions(fileId)
     try {
       localStorage.setItem(vdocKey(fileId, meta.versionId), json)
-      writeVersionList(fileId, [meta, ...webVersions(fileId)])
+      writeVersionList(fileId, [meta, ...list])
       break
     } catch (err) {
       // the browser is full for other reasons: the same rule for what may make room
@@ -764,7 +791,8 @@ async function versionThumbnail(url: string | null | undefined): Promise<string 
 /** The timed snapshot after a save; never fails the save. */
 async function webAutoVersion(doc: KDoc, now = Date.now()) {
   try {
-    const known = newestAuto.get(doc.id) ?? webVersions(doc.id).find((v) => v.name === null)?.createdAt
+    // one dated after now (the clock was ahead, then put right) doesn't count
+    const known = newestAuto.get(doc.id) ?? webVersions(doc.id).find((v) => v.name === null && v.createdAt <= now)?.createdAt
     if (known !== undefined && now >= known && now - known < AUTO_VERSION_EVERY_MS) {
       newestAuto.set(doc.id, known)
       return
@@ -777,6 +805,9 @@ async function webAutoVersion(doc: KDoc, now = Date.now()) {
     console.warn('[kiln] cannot keep an automatic version', err)
   }
 }
+
+const isQuotaError = (e: unknown) =>
+  e instanceof DOMException && (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED' || e.code === 22)
 
 /** Drops a file's versions once nothing by its id is left in the files or the trash. */
 async function dropOrphanVersions(b: FileStore, ids: Iterable<string>) {
@@ -796,7 +827,17 @@ const browserStorage: Storage = {
   list: async () => (await pickBrowserBackend()).list(),
   load: async (id) => (await pickBrowserBackend()).load(id),
   save: async (doc, opts) => {
-    await (await pickBrowserBackend()).save(doc, opts)
+    const b = await pickBrowserBackend()
+    for (;;) {
+      try {
+        await b.save(doc, opts)
+        break
+      } catch (err) {
+        // files on localStorage share it with versions: old automatic ones (any file's) give way to
+        // the file itself, so a full history never stops a save
+        if (b !== localStorageStorage || !isQuotaError(err) || !dropOldestAuto(doc.id, true)) throw err
+      }
+    }
     await webAutoVersion(doc)
   },
   remove: async (id) => (await pickBrowserBackend()).remove(id),
@@ -830,7 +871,10 @@ const browserStorage: Storage = {
     const now = Date.now()
     const shown = webVersions(fileId).find((m) => m.versionId === versionId)?.thumbnail
     const current = await b.load(fileId)
-    if (current) webSaveVersion(fileId, null, { ...bareDoc(current), thumbnail: await versionThumbnail(current.thumbnail) }, now)
+    // without room to keep what it replaces, the file stays as it is
+    if (current && !webSaveVersion(fileId, null, { ...bareDoc(current), thumbnail: await versionThumbnail(current.thumbnail) }, now)) {
+      throw new Error('Not enough browser storage to keep the file as it is before restoring. Delete some versions and try again.')
+    }
     // the file card shows the version (its document no longer carries the thumbnail itself)
     const doc: KDoc = { ...v, id: fileId, updatedAt: Math.max(now, (current?.updatedAt ?? 0) + 1) }
     if (shown) doc.thumbnail = shown

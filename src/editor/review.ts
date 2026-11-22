@@ -83,7 +83,10 @@ function sameColor(a: string, b: string) {
 function backgroundOf(doc: KDoc, n: KNode | undefined, pageBg: RGB, memo: Map<string, RGB | null>): RGB | null {
   if (!n) return pageBg
   if (memo.has(n.id)) return memo.get(n.id)!
-  let bg: RGB | null = backgroundOf(doc, n.parentId ? doc.nodes[n.parentId] : undefined, pageBg, memo)
+  const parent = n.parentId ? doc.nodes[n.parentId] : undefined
+  let bg: RGB | null = backgroundOf(doc, parent, pageBg, memo)
+  // a sibling painted before this layer (a shape behind text) may sit between it and the parent
+  if (bg && parent && drawnBehind(doc, parent, n)) bg = null
   // an image or shader paints pixels we can't know
   if (n.type === 'image' || n.type === 'shader') bg = null
   const fills = n.fills.filter((f: Fill) => f.visible && f.opacity > 0)
@@ -100,6 +103,46 @@ function backgroundOf(doc: KDoc, n: KNode | undefined, pageBg: RGB, memo: Map<st
   return bg
 }
 
+/** Whether a visible layer, or anything visible inside it, paints pixels. */
+function paints(doc: KDoc, n: KNode | undefined): boolean {
+  if (!n || !n.visible) return false
+  if (n.type === 'image' || n.type === 'shader') return true
+  if (n.fills.some((f) => f.visible && f.opacity > 0) || n.stroke?.visible) return true
+  return n.children.some((c) => paints(doc, doc.nodes[c]))
+}
+
+/**
+ * Whether an earlier sibling of `n` (painted below it) that draws something overlaps it. Flow
+ * children of a flex frame sit side by side, so only absolutely placed layers, or children of a
+ * frame without layout, can be behind one another. When a flex frame mixes the two, the flow
+ * child's x/y aren't reliable, so an absolute sibling that draws is taken to overlap.
+ */
+function drawnBehind(doc: KDoc, parent: KNode, n: KNode): boolean {
+  const flex = parent.layout.mode === 'flex'
+  const box = (x: KNode) => ({ x: x.x, y: x.y, w: x.width, h: x.height })
+  for (const id of parent.children) {
+    if (id === n.id) return false
+    const s = doc.nodes[id]
+    if (!s || !paints(doc, s)) continue
+    const sAbs = s.positioning === 'absolute'
+    const nAbs = n.positioning === 'absolute'
+    if (flex && !sAbs && !nAbs) continue
+    if (flex && sAbs !== nAbs) return true
+    const a = box(s)
+    const b = box(n)
+    if (a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y) return true
+  }
+  return false
+}
+
+/** Whether a layer is part of an instance (its root included): its design lives on the main. */
+function inInstance(doc: KDoc, n: KNode): boolean {
+  for (let x: KNode | undefined = n; x; x = x.parentId ? doc.nodes[x.parentId] : undefined) {
+    if (x.source && doc.nodes[x.source]?.main) return true
+  }
+  return false
+}
+
 /* ------------------------------------------------------------------ helpers */
 
 const DEFAULT_NAME = /^(Frame|Rectangle|Ellipse|Path|Text|Image|Shader|Group|Vector|Line|Layer)( \d+)?$/
@@ -107,7 +150,7 @@ const DEFAULT_NAME = /^(Frame|Rectangle|Ellipse|Path|Text|Image|Shader|Group|Vec
 const BUTTONISH = /\b(button|btn|link|cta|tab|chip|toggle)\b/i
 export const MIN_TAP = 44
 
-const fmt = (n: number) => String(Math.round(n * 10) / 10)
+const fmt = (n: number) => (Number.isFinite(n) ? String(Math.round(n * 10) / 10) : '?')
 
 /** Delete a layer and everything inside it, unlinking it from its parent or page. */
 function removeLayer(d: Draft<KDoc>, id: string) {
@@ -151,9 +194,13 @@ export function estimateTextHeight(n: KNode, width: number) {
 export function runReview(doc: KDoc, pageId?: string, opts: ReviewOptions = {}): Issue[] {
   const issues: Issue[] = []
   const pages = pageId ? doc.pages.filter((p) => p.id === pageId) : doc.pages
+  // the measured size when the canvas has it; otherwise only fixed sides are known (a hug or fill
+  // layer's stored size is stale, e.g. on a page that isn't open). Unknown sides are NaN, which
+  // every size rule reads as "not too small, not overflowing"
   const sizeOf = (n: KNode) => {
     const m = opts.size?.(n.id)
-    return m ? { w: m.w, h: m.h } : { w: n.width, h: n.height }
+    if (m) return { w: m.w, h: m.h }
+    return { w: n.widthMode === 'fixed' ? n.width : NaN, h: n.heightMode === 'fixed' ? n.height : NaN }
   }
 
   for (const page of pages) {
@@ -162,15 +209,17 @@ export function runReview(doc: KDoc, pageId?: string, opts: ReviewOptions = {}):
     const visit = (id: string) => {
       const n = doc.nodes[id]
       if (!n) return
-      // a hidden layer is one issue; what's inside it isn't seen, so isn't reviewed
+      // a hidden layer is one issue; what's inside it isn't seen, so isn't reviewed. Inside an
+      // instance, hiding a layer is an override (the main keeps it), so it isn't an issue
       if (!n.visible) {
-        issues.push({
-          id: `hidden-empty:${n.id}`,
-          rule: 'hidden-empty',
-          severity: 'warning',
-          nodeId: n.id,
-          message: `“${n.name}” is hidden. Delete it if it isn't needed, so it doesn't ship in code.`,
-        })
+        if (!inInstance(doc, n))
+          issues.push({
+            id: `hidden-empty:${n.id}`,
+            rule: 'hidden-empty',
+            severity: 'warning',
+            nodeId: n.id,
+            message: `“${n.name}” is hidden. Delete it if it isn't needed, so it doesn't ship in code.`,
+          })
         return
       }
       check(n)
@@ -179,6 +228,9 @@ export function runReview(doc: KDoc, pageId?: string, opts: ReviewOptions = {}):
 
     const check = (n: KNode) => {
       const size = sizeOf(n)
+      // tokens, names, alt text and empty frames inside an instance come from its main: they are
+      // reported (and fixed) there once, not once per instance as overrides that stop it syncing
+      const shared = inInstance(doc, n)
 
       // ---- text contrast
       if (n.type === 'text' && n.text && n.text.content.trim()) {
@@ -235,7 +287,7 @@ export function runReview(doc: KDoc, pageId?: string, opts: ReviewOptions = {}):
       }
 
       // ---- colours that match a token but don't use it
-      n.fills.forEach((f, i) => {
+      if (!shared) n.fills.forEach((f, i) => {
         if (f.type !== 'solid' || f.tokenId || !f.visible) return
         const tok = doc.tokens.find((t) => sameColor(t.value, f.color))
         if (!tok) return
@@ -251,7 +303,7 @@ export function runReview(doc: KDoc, pageId?: string, opts: ReviewOptions = {}):
           },
         })
       })
-      if (n.text && !n.text.tokenId) {
+      if (!shared && n.text && !n.text.tokenId) {
         const color = n.text.color
         const tok = doc.tokens.find((t) => sameColor(t.value, color))
         if (tok)
@@ -269,7 +321,7 @@ export function runReview(doc: KDoc, pageId?: string, opts: ReviewOptions = {}):
       }
 
       // ---- default names (text layers are named by what they say)
-      if (n.type !== 'text' && DEFAULT_NAME.test(n.name.trim())) {
+      if (!shared && n.type !== 'text' && DEFAULT_NAME.test(n.name.trim())) {
         const suggested = textName(doc, n)
         issues.push({
           id: `unnamed:${n.id}`,
@@ -287,7 +339,7 @@ export function runReview(doc: KDoc, pageId?: string, opts: ReviewOptions = {}):
       }
 
       // ---- images without alt text
-      if (n.type === 'image' && !n.image?.alt.trim()) {
+      if (!shared && n.type === 'image' && !n.image?.alt.trim()) {
         const named = !DEFAULT_NAME.test(n.name.trim()) ? n.name.trim() : ''
         issues.push({
           id: `alt-text:${n.id}`,
@@ -305,7 +357,7 @@ export function runReview(doc: KDoc, pageId?: string, opts: ReviewOptions = {}):
       }
 
       // ---- text overflowing a fixed box
-      if (n.type === 'text' && n.text && n.widthMode !== 'hug' && n.heightMode === 'fixed' && n.text.content) {
+      if (n.type === 'text' && n.text && n.widthMode !== 'hug' && n.heightMode === 'fixed' && n.text.content && Number.isFinite(size.w) && Number.isFinite(size.h)) {
         const needed = estimateTextHeight(n, size.w)
         if (needed > size.h + Math.max(2, n.text.fontSize * 0.25)) {
           issues.push({
@@ -327,14 +379,15 @@ export function runReview(doc: KDoc, pageId?: string, opts: ReviewOptions = {}):
       const draws = filled || !!n.stroke?.visible || n.shadows.some((s) => s.visible) || n.backdropBlur > 0
       const parent = n.parentId ? doc.nodes[n.parentId] : undefined
       const spacer = (parent?.layout.mode === 'flex' && n.positioning !== 'absolute') || n.widthMode === 'fill' || n.heightMode === 'fill'
-      if (n.type === 'frame' && n.children.length === 0 && !draws && !spacer) {
+      if (!shared && n.type === 'frame' && n.children.length === 0 && !draws && !spacer) {
         issues.push({
           id: `hidden-empty:${n.id}`,
           rule: 'hidden-empty',
           severity: 'warning',
           nodeId: n.id,
-          message: `“${n.name}” is an empty frame with no fill. Delete it?`,
-          fix: (d) => removeLayer(d, n.id),
+          message: n.locked ? `“${n.name}” is an empty frame with no fill (locked).` : `“${n.name}” is an empty frame with no fill. Delete it?`,
+          // never deleted by a fix: a locked layer (Delete skips those too) or a main component
+          fix: n.locked || n.main ? undefined : (d) => removeLayer(d, n.id),
         })
       }
     }
