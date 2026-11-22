@@ -8,13 +8,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
-import { produce, type Draft } from 'immer'
 import { Bookmark, Clock, History, RotateCcw, Trash2, X } from 'lucide-react'
 import { getEditor, useEditor } from '../store'
 import { storage, type VersionMeta } from '../../platform/storage'
 import { askConfirm, askText } from '../../ui/Dialogs'
 import { shortcut } from '../../platform/keys'
 import { snapshotNode } from '../snapshot'
+import { applyVersion } from './applyVersion'
 import { isNewerThanApp, NewerFileError } from '../migrate'
 import type { KDoc } from '../types'
 import './versions.css'
@@ -83,26 +83,6 @@ async function saveNamedVersion(): Promise<VersionMeta | null> {
     getEditor().notify('Could not save the version: ' + (e as Error).message)
     return null
   }
-}
-
-/**
- * Puts a version's content into the open document as one undo step. The file keeps its id and
- * name; pages, layers, tokens and comments come from the version, exactly as they were kept.
- * (Not through update(): that syncs component instances against the current mains, which would
- * change the restored instances.)
- */
-function applyVersion(v: KDoc) {
-  const s = getEditor()
-  const next = produce(s.doc, (d: Draft<KDoc>) => {
-    d.pages = v.pages as Draft<KDoc>['pages']
-    d.nodes = v.nodes as Draft<KDoc>['nodes']
-    d.tokens = v.tokens as Draft<KDoc>['tokens']
-    d.comments = v.comments as Draft<KDoc>['comments']
-  })
-  if (next === s.doc) return
-  s.checkpoint() // the undo step: the document as it is now
-  const pageId = next.pages.some((p) => p.id === s.pageId) ? s.pageId : next.pages[0]?.id
-  s.set({ doc: { ...next, updatedAt: Date.now() }, saveState: 'unsaved', pageId, selection: [], hoverId: null, editingTextId: null })
 }
 
 /* ------------------------------------------------------------------ host */
@@ -261,7 +241,7 @@ function VersionsDialog({ fileId, close }: { fileId: string; close: () => void }
       // what is there now is kept too, so it can be found here later and not only through Undo
       await storage.saveVersion(fileId, null, await openDocWithThumbnail()).catch(() => null)
       if (getEditor().doc.id !== fileId) return
-      applyVersion(v)
+      applyVersion(v, meta.thumbnail)
       changed()
       s.notify(`Restored ${meta.name ? `“${meta.name}”` : `the autosave from ${dayLabel(meta.createdAt).toLowerCase()} ${timeLabel(meta.createdAt)}`}. ${shortcut('⌘Z')} brings back what you had.`)
       close()

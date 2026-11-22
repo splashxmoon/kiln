@@ -197,6 +197,18 @@ describe('agent turns in the undo history', () => {
     expect(getTurn(id)?.reverted).toBe(false)
   })
 
+  it('undo and redo are later saves than the one they replace (desktop drops an older save)', () => {
+    userEdit((d) => void (d.nodes[ids.a].x = 10))
+    const edited = getEditor().doc.updatedAt
+    getEditor().undo()
+    expect(node(ids.a).x).toBe(0)
+    expect(getEditor().doc.updatedAt).toBeGreaterThan(edited)
+    const undone = getEditor().doc.updatedAt
+    getEditor().redo()
+    expect(node(ids.a).x).toBe(10)
+    expect(getEditor().doc.updatedAt).toBeGreaterThan(undone)
+  })
+
   it('closes a turn that hands straight over to another', async () => {
     startTurn()
     await agentEdit((d) => void (d.nodes[ids.a].x = 10))

@@ -790,9 +790,11 @@ pub fn restore_trash_in(root: &Path, trash_id: &str) -> Result<String, String> {
         .unwrap_or_else(|| root.to_path_buf());
 
     let doc_id = doc.get("id").and_then(Value::as_str).map(str::to_string);
-    let mut id = doc_id.clone().unwrap_or_else(|| split_trash_stem(trash_id).0.to_string());
+    let old_id = doc_id.clone().unwrap_or_else(|| split_trash_stem(trash_id).0.to_string());
+    let mut id = old_id.clone();
     if !is_valid_id(&id) || resolve(root, &id).is_some() {
         id = gen_id("f");
+        copy_versions(root, &old_id, &id);
     }
     if doc_id.as_deref() == Some(id.as_str()) {
         fs::rename(&src, file_path(&dir, &id)).map_err(|e| format!("cannot restore {trash_id}: {e}"))?;
@@ -928,14 +930,15 @@ fn auto_versions(root: &Path, file_id: &str) -> Vec<(String, u64)> {
 }
 
 /// The automatic versions to drop: every one except the newest `keep_recent` and the newest of
-/// each day (UTC) within the last `keep_days` days.
+/// each day (UTC) within the last `keep_days` days. One dated after `now` (the clock is behind
+/// where it was) is left alone and takes no place, so it never crowds out the versions made now.
 pub fn autos_to_prune(autos: &[(String, u64)], now: u64, keep_recent: usize, keep_days: u64) -> Vec<String> {
-    let mut sorted: Vec<&(String, u64)> = autos.iter().collect();
+    let mut sorted: Vec<&(String, u64)> = autos.iter().filter(|(_, at)| *at <= now).collect();
     sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
     let mut days = HashSet::new();
     let mut out = Vec::new();
     for (i, (id, at)) in sorted.into_iter().enumerate() {
-        let day_keeper = now.saturating_sub(*at) < keep_days * DAY_MS && days.insert(at / DAY_MS);
+        let day_keeper = now - at < keep_days * DAY_MS && days.insert(at / DAY_MS);
         if i >= keep_recent && !day_keeper {
             out.push(id.clone());
         }
@@ -990,14 +993,49 @@ fn write_version(
 
 /// The timed snapshot taken on save. Never fails the save: a problem is only logged.
 fn auto_version(root: &Path, file_id: &str, doc: &Value, bytes: &[u8], now: u64) {
-    let newest = auto_versions(root, file_id).into_iter().map(|(_, at)| at).max();
-    if newest.is_some_and(|at| now.saturating_sub(at) < AUTO_EVERY_MS) {
+    // one dated after now (the clock was ahead, then put right) doesn't count, or none would be
+    // made until the clock caught up with it
+    let newest = auto_versions(root, file_id).into_iter().map(|(_, at)| at).filter(|&at| at <= now).max();
+    if newest.is_some_and(|at| now - at < AUTO_EVERY_MS) {
         return;
     }
     let thumbnail = meta_from_value(doc, file_id).thumbnail;
     match write_version(root, file_id, bytes, thumbnail, None, now) {
         Ok(_) => prune_versions(root, file_id, now),
         Err(e) => eprintln!("[kiln] cannot keep an automatic version of {file_id}: {e}"),
+    }
+}
+
+/// A file given a new id (restored from the trash, or moved out of a removed project, while its id
+/// is taken) takes a copy of the versions kept under its old id. A copy, since the old id is still
+/// another file's.
+fn copy_versions(root: &Path, from: &str, to: &str) {
+    if !is_valid_id(from) || from == to {
+        return;
+    }
+    let Ok(rd) = fs::read_dir(versions_dir(root, from)) else { return };
+    let dst = versions_dir(root, to);
+    if let Err(e) = fs::create_dir_all(&dst) {
+        eprintln!("[kiln] cannot create {}: {e}", dst.display());
+        return;
+    }
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let copied = if name.starts_with('.') {
+            Ok(()) // an unfinished write
+        } else if name.ends_with(".json") {
+            fs::read(e.path())
+                .map_err(|e| e.to_string())
+                .and_then(|b| serde_json::from_slice::<VersionMeta>(&b).map_err(|e| e.to_string()))
+                .and_then(|m| write_json(&dst.join(&name), &VersionMeta { file_id: to.to_string(), ..m }))
+        } else if name.ends_with(".kiln") {
+            fs::copy(e.path(), dst.join(&name)).map(|_| ()).map_err(|e| e.to_string())
+        } else {
+            Ok(())
+        };
+        if let Err(err) = copied {
+            eprintln!("[kiln] cannot copy version {name} of {from}: {err}");
+        }
     }
 }
 
@@ -1079,8 +1117,13 @@ pub fn restore_version_in(root: &Path, file_id: &str, version_id: &str) -> Resul
         return Err(format!("version {version_id:?} is not a document"));
     }
     let now = now_millis();
-    if resolve(root, file_id).is_some() {
-        save_version_at(root, file_id, None, None, now)?;
+    // kept as it is on disk, byte for byte: a damaged file (the likeliest reason to restore) can't
+    // be parsed, and refusing would leave no way back to a good version
+    if let Some(path) = resolve(root, file_id) {
+        let bytes = fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let thumbnail = serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| meta_from_value(&v, file_id).thumbnail);
+        write_version(root, file_id, &bytes, thumbnail, None, now)?;
+        prune_versions(root, file_id, now);
     }
     // newer than anything saved, so an older save still in flight doesn't land over it
     let last = saved().get(&(root.to_path_buf(), file_id.to_string())).copied().unwrap_or(0.0);
@@ -1226,6 +1269,7 @@ pub fn remove_project_in(root: &Path, id: &str, mode: &str) -> Result<(), String
             }
         };
         let dest = file_path(root, &new_id);
+        copy_versions(root, &stem, &new_id);
         match read_json(&path) {
             Ok(mut doc) if doc.is_object() => {
                 doc["id"] = Value::String(new_id.clone());
@@ -2123,6 +2167,76 @@ mod tests {
         delete_in(&root, "g").unwrap();
         purge_trash_in(&root, None).unwrap();
         assert!(list_versions_in(&root, "g").unwrap().is_empty());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_version_dated_in_the_future_does_not_stop_automatic_versions() {
+        let root = temp_root();
+        save_in_at(&root, &doc("c", "C", 1), None, T0).unwrap();
+        // the clock was a year ahead once, then put right
+        save_version_at(&root, "c", None, None, T0 + 365 * DAY_MS).unwrap();
+        save_in_at(&root, &doc("c", "C", 2), None, T0 + 20 * MIN).unwrap();
+        assert_eq!(list_versions_in(&root, "c").unwrap().len(), 3);
+        // and from then on every ten minutes again, not on every save
+        save_in_at(&root, &doc("c", "C", 3), None, T0 + 21 * MIN).unwrap();
+        assert_eq!(list_versions_in(&root, "c").unwrap().len(), 3);
+        save_in_at(&root, &doc("c", "C", 4), None, T0 + 31 * MIN).unwrap();
+        assert_eq!(list_versions_in(&root, "c").unwrap().len(), 4);
+        fs::remove_dir_all(&root).unwrap();
+
+        // thirty dated later the same day don't get a new one pruned the moment it is made
+        let mut autos: Vec<(String, u64)> = (1..=30).map(|k| (format!("a{}-0", T0 + k * MIN), T0 + k * MIN)).collect();
+        autos.push((format!("a{T0}-1"), T0));
+        assert!(autos_to_prune(&autos, T0, 30, 30).is_empty());
+    }
+
+    #[test]
+    fn restore_works_when_the_file_is_damaged_and_keeps_the_damaged_bytes() {
+        let root = temp_root();
+        save_in_at(&root, &doc("r", "A", 1), None, T0).unwrap();
+        let v = save_version_at(&root, "r", Some("One"), None, T0 + MIN).unwrap();
+        fs::write(root.join("r.kiln"), b"{garbage").unwrap();
+        let restored = restore_version_in(&root, "r", &v.version_id).unwrap();
+        assert_eq!(restored["name"], "A");
+        assert_eq!(load_in(&root, "r").unwrap().unwrap()["name"], "A");
+        // what was there is kept as it was, byte for byte
+        let list = list_versions_in(&root, "r").unwrap();
+        let kept = list.iter().find(|m| m.name.is_none() && m.created_at > T0 + MIN).unwrap();
+        assert_eq!(fs::read(file_path(&versions_dir(&root, "r"), &kept.version_id)).unwrap(), b"{garbage");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_file_given_a_new_id_keeps_its_versions() {
+        // restored from the trash while its id is taken again
+        let root = temp_root();
+        save_in(&root, &doc("k", "k", 1), None).unwrap();
+        save_version_in(&root, "k", Some("Mine"), None).unwrap();
+        delete_in(&root, "k").unwrap();
+        save_in(&root, &doc("k", "other", 2), None).unwrap();
+        let tid = list_trash_in(&root).unwrap()[0].trash_id.clone();
+        let new = restore_trash_in(&root, &tid).unwrap();
+        assert_ne!(new, "k");
+        let mine = list_versions_in(&root, &new).unwrap();
+        assert!(mine.iter().any(|v| v.name.as_deref() == Some("Mine")));
+        assert!(mine.iter().all(|v| v.file_id == new));
+        let side: VersionMeta = serde_json::from_slice(&fs::read(versions_dir(&root, &new).join(format!("{}.json", mine[0].version_id))).unwrap()).unwrap();
+        assert_eq!(side.file_id, new);
+        // the live "k" keeps its own too
+        assert!(!list_versions_in(&root, "k").unwrap().is_empty());
+        fs::remove_dir_all(&root).unwrap();
+
+        // moved out of a removed project into a top level where its id is taken
+        let root = temp_root();
+        let p = create_project_in(&root, "Work", None).unwrap();
+        save_in(&root, &doc("d", "in project", 1), Some(&p.id)).unwrap();
+        save_version_in(&root, "d", Some("Project one"), None).unwrap();
+        fs::write(root.join("d.kiln"), serde_json::to_vec(&doc("d", "top", 2)).unwrap()).unwrap();
+        remove_project_in(&root, &p.id, "keep-files").unwrap();
+        let moved = list_in(&root).unwrap().into_iter().find(|f| f.name == "in project").unwrap().id;
+        assert_ne!(moved, "d");
+        assert!(list_versions_in(&root, &moved).unwrap().iter().any(|v| v.name.as_deref() == Some("Project one")));
         fs::remove_dir_all(&root).unwrap();
     }
 }

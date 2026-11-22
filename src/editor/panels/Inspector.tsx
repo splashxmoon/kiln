@@ -144,9 +144,12 @@ function ComponentSection({ n }: { n: KNode }) {
             <button className="k-btn-ghost k-sm" onClick={() => goToMain(info.main.id)} title="Select the main component">
               <Crosshair size={11} /> Go to main
             </button>
-            <button className="k-btn-ghost k-sm" onClick={() => resetOverrides(n.id) && notify('Reset to the main component')} title="Put this layer back to how the main is">
-              <RotateCcw size={11} /> Reset
-            </button>
+            {/* a layer the instance added itself mirrors nothing in the main, so there is nothing to reset */}
+            {n.source && nodes[n.source] && (
+              <button className="k-btn-ghost k-sm" onClick={() => resetOverrides(n.id) && notify('Reset to the main component')} title="Put this layer back to how the main is">
+                <RotateCcw size={11} /> Reset
+              </button>
+            )}
             <button className="k-btn-ghost k-sm" onClick={() => detach(n.id) && notify('Detached the instance')} title="Unlink from the main; keeps its look">
               <Unlink size={11} /> Detach
             </button>

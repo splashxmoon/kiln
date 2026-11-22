@@ -269,6 +269,14 @@ export interface EditorState {
 
 const HISTORY_LIMIT = 200
 
+/**
+ * An undo or redo step as a new save: the same content, stamped later than what is open now.
+ * Storage drops a save older than the one on disk (two autosaves can overlap), and a history
+ * entry keeps the stamp it had, so without this an undo after an autosave would show as saved
+ * but never be written. Content stays shared, so turns.ts still recognises the document.
+ */
+const laterThan = (d: KDoc, cur: KDoc): KDoc => ({ ...d, updatedAt: Math.max(Date.now(), cur.updatedAt + 1) })
+
 export const useEditor = create<EditorState>((set, get) => {
   const record = (key?: string) => {
     const { history, doc } = get()
@@ -387,10 +395,14 @@ export const useEditor = create<EditorState>((set, get) => {
     discardNode(id) {
       const { doc, history } = get()
       if (!doc.nodes[id]) return
-      const next = produce(doc, (d) => {
-        detach(d, id)
-        removeDeep(d, id)
-      })
+      // through syncInstances like any edit: an empty text discarded from a main leaves its instances too
+      const next = syncInstances(
+        doc,
+        produce(doc, (d) => {
+          detach(d, id)
+          removeDeep(d, id)
+        }),
+      )
       const prev = history.past[history.past.length - 1]
       const createdLast = prev && !prev.nodes[id]
       set({
@@ -406,7 +418,7 @@ export const useEditor = create<EditorState>((set, get) => {
       const prev = history.past[history.past.length - 1]
       if (!prev) return
       set({
-        doc: prev,
+        doc: laterThan(prev, doc),
         history: { past: history.past.slice(0, -1), future: [doc, ...history.future], lastKey: null, lastTime: 0 },
         selection: selection.filter((id) => prev.nodes[id]),
         editingTextId: null,
@@ -419,7 +431,7 @@ export const useEditor = create<EditorState>((set, get) => {
       const next = history.future[0]
       if (!next) return
       set({
-        doc: next,
+        doc: laterThan(next, doc),
         history: { past: [...history.past, doc], future: history.future.slice(1), lastKey: null, lastTime: 0 },
         selection: selection.filter((id) => next.nodes[id]),
         editingTextId: null,

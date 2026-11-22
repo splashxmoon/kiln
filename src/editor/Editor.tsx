@@ -17,6 +17,7 @@ import { isTauri, startAgentBridge, onAgentActivity } from '../platform/tauri'
 import { AGENT_TOOLS, runTool, installWindowApi, activityStart, activityEnd, activityReset } from '../agent/tools'
 import { toolLabel } from '../agent/humanize'
 import { snapshotNode } from './snapshot'
+import { RESTORED_EVENT } from './panels/applyVersion'
 import { sampleCanvasColor } from './eyedropper'
 import { registerEyedropper } from '../ui/eyedropper'
 import { ensureFont } from './fonts'
@@ -125,6 +126,13 @@ function useAutosave() {
       unsubscribe()
       window.clearTimeout(timer.current)
     }
+  }, [])
+  // a version restored (VersionsDialog.tsx): the last snapshot shows the canvas it replaced, so
+  // saves carry the version's own thumbnail until the snapshot right after the next save
+  useEffect(() => {
+    const restored = (e: Event) => Object.assign(thumb, { docId: (e as CustomEvent<string>).detail, url: undefined, at: 0 })
+    window.addEventListener(RESTORED_EVENT, restored)
+    return () => window.removeEventListener(RESTORED_EVENT, restored)
   }, [])
   // flush on unload
   useEffect(() => {

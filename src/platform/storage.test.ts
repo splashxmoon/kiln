@@ -268,4 +268,92 @@ describe('versions in the browser', () => {
     const drop = new Set(autosToPrune(autos, now, 3, 2))
     expect(autos.map((a) => a.versionId).filter((id) => !drop.has(id))).toEqual(['a0', 'a1', 'a2', 'a24'])
   })
+
+  it('keeps making automatic versions after the clock went back', async () => {
+    const doc = await savedAt(T0, 'Clock')
+    // twelve made while the clock was three hours ahead, the same day
+    for (let i = 0; i < 12; i++) {
+      vi.setSystemTime(T0 + 3 * 60 * MIN + i * 10 * MIN)
+      await storage.saveVersion(doc.id, null)
+    }
+    // the clock put right: the next timed one is made, and not pruned straight away
+    await savedAt(T0 + 15 * MIN, 'Clock', doc)
+    const list = await storage.listVersions(doc.id)
+    expect(list.some((v) => v.createdAt === T0 + 15 * MIN)).toBe(true)
+    // and those are left alone: the ten they had pruned themselves down to, by their own clock
+    expect(list.filter((v) => v.createdAt > T0 + 60 * MIN).length).toBe(10)
+  })
+
+  it('restoring in the editor is one undo step, and its save is never older than the last', async () => {
+    const { getEditor } = await import('../editor/store')
+    const { applyVersion } = await import('../editor/panels/applyVersion')
+    const doc = emptyDoc('Open')
+    const kept = { ...doc, pages: [...doc.pages, { ...doc.pages[0], id: 'p-kept', name: 'Kept page' }] }
+    // the clock is an hour behind the last edit
+    vi.useFakeTimers({ now: T0, toFake: ['Date'] })
+    getEditor().loadDoc({ ...doc, updatedAt: T0 + 60 * MIN })
+    applyVersion(kept, 'data:image/jpeg;base64,VVVV')
+    const s = getEditor()
+    expect(s.doc.pages.map((p) => p.id)).toEqual(kept.pages.map((p) => p.id))
+    expect(s.doc.updatedAt).toBeGreaterThan(T0 + 60 * MIN)
+    expect(s.doc.thumbnail).toBe('data:image/jpeg;base64,VVVV')
+    expect(s.saveState).toBe('unsaved')
+    getEditor().undo()
+    expect(getEditor().doc.pages.length).toBe(doc.pages.length)
+  })
+
+  it('lists the first version of a file once', async () => {
+    const doc = await savedAt(T0, 'First of its kind')
+    expect(mem.has(`kiln:vlist:${doc.id}`)).toBe(true)
+    mem.delete(`kiln:vlist:${doc.id}`) // as if never written, or lost
+    vi.setSystemTime(T0 + MIN)
+    const named = (await storage.saveVersion(doc.id, 'Second'))!
+    const ids = (await storage.listVersions(doc.id)).map((v) => v.versionId)
+    expect(ids.length).toBe(2)
+    expect(new Set(ids).size).toBe(2)
+    expect(ids[0]).toBe(named.versionId)
+  })
+
+  it('a damaged version list neither throws nor strands the versions it listed', async () => {
+    const doc = await savedAt(T0, 'Damaged list')
+    vi.setSystemTime(T0 + MIN)
+    const named = (await storage.saveVersion(doc.id, 'Kept'))!
+    const docs = () => [...mem.keys()].filter((k) => k.startsWith(`kiln:vdoc:${doc.id}:`)).length
+    for (const bad of ['{bad', '{}', '"x"']) {
+      mem.set(`kiln:vlist:${doc.id}`, bad)
+      const list = await storage.listVersions(doc.id)
+      // found again from the stored documents, so they can still be opened, deleted and freed
+      expect(list.length).toBe(docs())
+      expect(list.some((v) => v.versionId === named.versionId && v.name !== null)).toBe(true)
+    }
+    vi.setSystemTime(T0 + 2 * MIN)
+    await storage.saveVersion(doc.id, 'Another')
+    expect((await storage.listVersions(doc.id)).length).toBe(docs())
+  })
+
+  it('makes room in old automatic versions when a file save would not fit', async () => {
+    for (const k of [...mem.keys()]) if (k.startsWith('kiln:v')) mem.delete(k)
+    const doc = await savedAt(T0, 'Crowded')
+    for (let i = 1; i <= 3; i++) {
+      vi.setSystemTime(T0 + i * MIN)
+      await storage.saveVersion(doc.id, null, { ...doc, thumbnail: 'z'.repeat(200_000) })
+    }
+    quota = used() + 1000
+    const bigger = { ...doc, name: 'Crowded ' + 'n'.repeat(5000), updatedAt: T0 + 5 * MIN }
+    await expect(storage.save(bigger)).resolves.toBeUndefined()
+    expect(stored(doc.id).name).toBe(bigger.name)
+  })
+
+  it('restoring through storage refuses when what it replaces cannot be kept', async () => {
+    const doc = await savedAt(T0, 'Mine')
+    vi.setSystemTime(T0 + MIN)
+    const v = (await storage.saveVersion(doc.id, 'Old'))!
+    await savedAt(T0 + 2 * MIN, 'Newer work', doc)
+    // no automatic version to drop either: only named ones are left for this file
+    for (const a of (await storage.listVersions(doc.id)).filter((x) => x.name === null)) await storage.deleteVersion(doc.id, a.versionId)
+    quota = used() + 50
+    vi.setSystemTime(T0 + 3 * MIN)
+    await expect(storage.restoreVersion(doc.id, v.versionId)).rejects.toThrow(/storage/)
+    expect(stored(doc.id).name).toBe('Newer work')
+  })
 })

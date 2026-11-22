@@ -151,6 +151,54 @@ describe('design review', () => {
     expect(rulesOf(doc, 'hidden-empty')).toEqual([])
   })
 
+  it('contrast: text over a shape drawn behind it is not judged against the frame (unknown background)', () => {
+    // a common button: a blue rect with white text on top, as siblings in a plain frame
+    const doc = build((board, add) => {
+      add(createNode('rect', board.pageId, { name: 'Button bg', x: 0, y: 0, width: 120, height: 44, fills: [solidFill('#1D4ED8')] }))
+      add(text('Buy', { color: '#FFFFFF' }, { x: 10, y: 10, width: 60, height: 20 }))
+      // white text that does not overlap the rect is still checked against the white frame
+      add(text('Ghost', { color: '#FFFFFF' }, { x: 200, y: 200, width: 60, height: 20 }))
+    })
+    expect(rulesOf(doc, 'contrast').map((i) => doc.nodes[i.nodeId].name)).toEqual(['Ghost'])
+  })
+
+  it('empty frames: a locked one is reported but never deleted by a fix', () => {
+    const doc = build((board, add) => void add(createNode('frame', board.pageId, { name: 'Pinned', fills: [], locked: true })))
+    const [issue] = rulesOf(doc, 'hidden-empty')
+    expect(issue).toBeDefined()
+    expect(issue.fix).toBeUndefined()
+  })
+
+  it('components: layers inside an instance are reviewed on the main, not once per instance', () => {
+    const doc = build((board, add, d) => {
+      d.tokens.push(createToken('brand/ember', '#FF5B1F'))
+      const main = add(createNode('frame', board.pageId, { name: 'Card', main: true, fills: [solidFill('#FFFFFF')] }))
+      add(createNode('rect', board.pageId, { name: 'Rectangle 2', fills: [solidFill('#FF5B1F')] }), main)
+      add(createNode('frame', board.pageId, { name: 'Badge', visible: false }), main)
+      const mainKids = [...main.children]
+      const inst = add(createNode('frame', board.pageId, { name: 'Card', source: main.id, fills: [solidFill('#FFFFFF')] }))
+      add(createNode('rect', board.pageId, { name: 'Rectangle 2', source: mainKids[0], fills: [solidFill('#FF5B1F')] }), inst)
+      add(createNode('frame', board.pageId, { name: 'Badge', source: mainKids[1], visible: false }), inst)
+    })
+    const main = Object.values(doc.nodes).find((n) => n.main)!
+    for (const rule of ['off-token', 'unnamed', 'hidden-empty'] as const) {
+      const issues = rulesOf(doc, rule)
+      // exactly one, and on the main's layer: fixing the main flows into the instance
+      expect(issues, rule).toHaveLength(1)
+      expect(doc.nodes[issues[0].nodeId].parentId, rule).toBe(main.id)
+    }
+  })
+
+  it('a hug-sized layer with no measurement (another page) is not judged by its stale stored size', () => {
+    const doc = build((board, add) => {
+      add(createNode('frame', board.pageId, { name: 'Sign in button', width: 10, height: 10, widthMode: 'hug', heightMode: 'hug', fills: [solidFill('#EEE')] }))
+      add(createNode('frame', board.pageId, { name: 'Close button', width: 20, height: 20, widthMode: 'fixed', heightMode: 'fixed', fills: [solidFill('#EEE')] }))
+    })
+    // the measuring callback knows nothing (layer not on screen)
+    const issues = runReview(doc, undefined, { size: () => null }).filter((i) => i.rule === 'tap-target')
+    expect(issues.map((i) => doc.nodes[i.nodeId].name)).toEqual(['Close button'])
+  })
+
   it('scopes to one page when given a pageId', () => {
     const doc = build((board, add) => void add(createNode('rect', board.pageId, { name: 'Rectangle' })))
     expect(runReview(doc, 'no-such-page')).toEqual([])
